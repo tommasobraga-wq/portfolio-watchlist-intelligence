@@ -122,6 +122,38 @@ class TestSilence:
         assert apply(original, decision) == original
 
 
+class TestInstrumentsThatNeverReport:
+    """ETFs are legitimate holdings but publish no earnings.
+
+    The watchlist doubles as the portfolio list, so such entries are permanent. They must
+    stay completely silent: never notified, and never flagged as overdue — an alert every
+    few days about an instrument that has nothing to report would train the reader to
+    ignore the alerts that matter.
+    """
+
+    def test_no_expected_date_means_no_lookup(self) -> None:
+        assert is_in_window(None, TODAY) is False
+
+    def test_never_notifies(self) -> None:
+        etf = TrackedTicker("GOAI-EUR.MI", Label.HELD, next_earnings_date=None)
+
+        assert classify(etf, None, TODAY).outcome is Outcome.NOT_YET_PUBLISHED
+
+    def test_never_goes_overdue(self) -> None:
+        # OVERDUE needs an expected date; without one it can never trigger.
+        etf = TrackedTicker("GOAI-EUR.MI", Label.HELD, next_earnings_date=None)
+
+        decision = classify(etf, None, TODAY)
+
+        assert decision.outcome is not Outcome.OVERDUE
+        assert to_report([decision]) == ([], [])
+
+    def test_state_is_left_untouched(self) -> None:
+        etf = TrackedTicker("GOAI-EUR.MI", Label.HELD)
+
+        assert apply(etf, classify(etf, None, TODAY)) == etf
+
+
 def test_report_splits_announcements_from_faults() -> None:
     decisions = [
         classify(ticker(notified="2026-Q2"), report(), TODAY),
