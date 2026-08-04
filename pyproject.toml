@@ -31,3 +31,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+# `fakes` is the test-support module in tests/, not a third-party package.
+known-first-party = ["pwi", "fakes"]
