@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from pwi import vault
+from pwi.config import load_environment
 from pwi.models import Label, TrackedTicker
 from pwi.watchlist import DEFAULT_PATH, load, save
 
@@ -132,6 +133,7 @@ COMMANDS = {"generate-key": generate_key, "show": show, "edit": edit}
 
 
 def main(argv: list[str]) -> int:
+    load_environment()
     if len(argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2

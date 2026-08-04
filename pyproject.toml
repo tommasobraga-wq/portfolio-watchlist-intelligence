@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "cryptography>=50.0.0",
     "httpx>=0.28",
+    "python-dotenv>=1.2.2",
     "yfinance>=1.5.2",
 ]
 
