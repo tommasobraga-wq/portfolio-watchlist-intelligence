@@ -4,10 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Phase 1, early. Implemented: the tracked-ticker record (`src/pwi/models.py`), the JSON watchlist
-store (`src/pwi/watchlist.py`), and the direct Alpha Vantage REST client with quota handling
-(`src/pwi/alphavantage.py`). Not built yet: the two scheduled jobs, the custom MCP server, the
-deployment.
+Working end to end and deployed on GitHub Actions. Not built: the custom MCP server (Phase 3),
+the optional Lambda deployment (Phase 5), the simulated portfolio (Phase 6).
+
+Layering, and it matters — the interesting logic is deliberately kept away from I/O:
+
+| Module | Role |
+|---|---|
+| `digest.py` | **all** decisions: window, de-duplication, adoption, overdue. Pure, takes `today` |
+| `render.py` | **all** wording (Italian). Pure |
+| `yahoo.py` | **all** vendor detail: DataFrames, `NaN`, tz-aware stamps. Nothing leaks past it |
+| `jobs.py` | orchestration and persistence only |
+| `sources.py` | the `EarningsSource` / `PriceSource` contracts both sides depend on |
+
+Earnings happen four times a year, so the decision logic can only be exercised against fakes with
+invented dates. Keep it pure — putting a network call or `date.today()` into `digest.py` makes the
+interesting cases untestable.
+
+**Two orderings are load-bearing, do not rearrange them:**
+- State is written *after* a mail is delivered. Stamping first means an SMTP failure marks a
+  quarter notified that nobody saw, and it is never retried.
+- An unavailable ticker is skipped, never fatal — one throttled lookup must not cost the other
+  twenty-six their results.
 
 Read [`docs/adr/adr-portfolio-watchlist-earnings-intelligence.md`](docs/adr/adr-portfolio-watchlist-earnings-intelligence.md)
 before proposing structure — it fixes the scope, the data model, and *why* each data source was chosen.
@@ -17,15 +35,27 @@ before proposing structure — it fixes the scope, the data model, and *why* eac
 Python 3.12+, managed with `uv`.
 
 ```sh
-uv sync                                        # install deps (incl. dev group)
-uv run pytest                                  # all tests
-uv run pytest tests/test_alphavantage.py::test_parses_quarters   # a single test
-uv run ruff check . && uv run ruff format .    # lint + format
-uv run scripts/check_mi_coverage.py UCG.MI     # Phase 1 coverage probe (costs 1 request)
+uv sync
+uv run pytest -q                               # all tests; no network, no credentials
+uv run pytest tests/test_digest.py -q          # one file
+uv run ruff check . && uv run ruff format .
+
+uv run python -m pwi calendar-sync             # refresh expected dates
+uv run python -m pwi results-watch             # detect and mail results
+uv run python -m pwi results-watch --dry-run   # prints mails, writes nothing
+
+uv run scripts/watchlist_tool.py show          # add / remove / edit / generate-key
+uv run scripts/smoke_test.py                   # real source + real SMTP, sends real mail
 ```
 
-Secrets come from `.env` (`ALPHAVANTAGE_API_KEY`); `data/watchlist.json` is local and untracked —
-copy `data/watchlist.example.json` to create it.
+**The watchlist is encrypted** (`data/watchlist.enc`, committed in that form) because it names
+which securities are held. `PWI_WATCHLIST_KEY` in `.env` decrypts it; the same value plus
+`GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` and `NOTIFY_TO` exist as repository secrets. `.env` is
+loaded automatically by entry points, with real environment variables taking precedence so CI
+secrets are never shadowed.
+
+Never write cleartext holdings into the repository — `watchlist_tool.py edit` decrypts to a temp
+file and removes it afterwards, which is the pattern to follow.
 
 ## What this project is
 
@@ -60,24 +90,26 @@ Swapping one for a more convenient equivalent defeats the point of the project:
 | Concern | Source | Style being exercised |
 |---|---|---|
 | Fundamentals / company data | S&P Global (Kensho) MCP (already connected) | MCP **client** |
-| Earnings dates, results, and (later) prices | **Yahoo Finance undocumented endpoints, called directly** | Raw **REST** — cookie/crumb session, token refresh, defensive parsing |
+| Earnings dates, results, and (later) prices | **Yahoo Finance via `yfinance`** | the only source verified to cover this watchlist at zero cost |
 | Aggregation / digest / cross-ticker state logic | Custom minimal MCP server (Phase 3) | MCP **server** |
 
 **Alpha Vantage was rejected on 2026-08-04 after measurement — do not reinstate it.** Its catalogue
 is 14,243 securities across US exchanges only, with zero foreign-suffix symbols; `UCG.MI` returns no
 earnings *and* an empty `TIME_SERIES_DAILY`. `SYMBOL_SEARCH` is a trap: it returns `CRIN.DEX`,
 `UNCRY`, `0RLS.LON` for these companies, none of which exist in the fundamentals universe — never use
-it to establish coverage. `src/pwi/alphavantage.py` is kept only as the reference pattern for quota
-and error handling.
+it to establish coverage. The Alpha Vantage client has been removed now that Yahoo is in place.
 
-**Do not replace the hand-written Yahoo client with `yfinance`.** It is a dev dependency and test
-oracle only — comparing against it tells you whether Yahoo changed or the client did. Using it as
-the integration would abstract away the raw-REST work this slot exists to exercise, exactly like
-Alpha Vantage's official MCP server would have.
+**`yfinance` is the runtime dependency; do not try to replace it with a hand-written REST client.**
+That was attempted and abandoned on evidence: Yahoo fingerprints the **TLS handshake** (JA3/JA4),
+not just cookies and headers, so `httpx` was refused with 429 on every endpoint — including
+`chart`, which needs no crumb — across three retries over nine minutes. Correct HTTP does not help;
+it would take browser impersonation via `curl_cffi`, i.e. defeating bot detection, which teaches
+evasion rather than API integration.
 
-Alpha Vantage also ships an official MCP server for the same data — using it was explicitly
-rejected, since it would repeat the MCP-client skill already covered by Kensho and leave raw REST
-integration unexercised. The overlap to avoid is in *style*, not in *data*.
+**The raw-REST learning goal is therefore set aside in v1, deliberately** (see the ADR). The
+cheapest documented API covering Milan, earnings and prices is $99/month, out of budget, and EODHD
+does not list Milan at all. A working unattended notifier outranks the learning goal; the MCP
+client and server skills are unaffected.
 
 Constraints to code against:
 - **Sources go behind `EarningsSource` / `PriceSource` protocols.** No vendor concept — API keys,
@@ -86,15 +118,19 @@ Constraints to code against:
   not from every eventuality. This is why a vendor swap stays a one-class change.
 - **Money is `Decimal`, never `float`.** Repeated portfolio valuation accumulates binary
   floating-point error. EPS tolerates `float`; prices and positions do not.
-- Yahoo requires a **cookie + crumb** handshake and rejects naive requests. Expect to refresh the
-  token and to parse defensively — the endpoints are undocumented and can change without notice.
+- Yahoo's endpoints are undocumented and can change without notice, so parse defensively and
+  treat `SourceUnavailable` as "retry next run", never as "this ticker has no data".
 - A simulated portfolio is a later phase but already binds source choice: it needs daily prices,
   dividends and splits from **one** consistent source, since mixing vendors yields incoherent returns.
 
 ## Deployment target
 
-**GitHub Actions** (`schedule:` cron), headless — Calendar Sync weekly, Results Watch daily ~06:00
-UTC. There is no frontend and none is planned.
+**GitHub Actions** (`schedule:` cron), headless — Calendar Sync weekly (Sun 03:00 UTC), Results
+Watch every 3 hours. There is no frontend and none is planned.
+
+Three hours rather than faster because the limit on latency is how long Yahoo takes to populate an
+actual EPS after a company reports, not the polling rate. Actions cron is best-effort and drifts;
+at this cadence a missed run is invisible.
 
 Three constraints here are decisions, not conveniences (ADR *Deployment* / *Delivery*):
 
