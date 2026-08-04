@@ -9,6 +9,7 @@ from pwi.digest import (
     apply,
     classify,
     is_in_window,
+    is_source_stale,
     to_report,
 )
 from pwi.models import EarningsReport, Label, TrackedTicker
@@ -120,6 +121,58 @@ class TestSilence:
         decision = classify(original, None, TODAY)
 
         assert apply(original, decision) == original
+
+
+class TestSourceWithAStaleHistory:
+    """FBK.MI, TIT.MI and A2A.MI: Yahoo supplies forward dates but stopped publishing the
+    actuals years ago.
+
+    The trap this class pins down: after adoption, `last_notified_period` equals the period
+    of that years-old report. Testing "have we already notified this period?" therefore
+    answers yes and suppresses the alert — leaving total silence exactly where the reader
+    most needs telling. The test must be whether a result exists for *this* cycle.
+    """
+
+    STALE = EarningsReport("FBK.MI", date(2021, 11, 9), date(2021, 11, 9), 0.11, 0.11, None)
+
+    def ticker(self) -> TrackedTicker:
+        return TrackedTicker("FBK.MI", Label.HELD, date(2026, 11, 5), self.STALE.period)
+
+    def test_a_years_old_report_does_not_suppress_the_alert(self) -> None:
+        decision = classify(self.ticker(), self.STALE, date(2026, 11, 9))
+
+        assert decision.outcome is Outcome.OVERDUE
+        assert decision.days_overdue == 4
+
+    def test_the_alert_carries_what_the_source_last_had(self) -> None:
+        decision = classify(self.ticker(), self.STALE, date(2026, 11, 9))
+
+        assert decision.source_last_seen == date(2021, 11, 9)
+        assert is_source_stale(decision, date(2026, 11, 9)) is True
+
+    def test_a_recent_gap_is_not_blamed_on_the_source(self) -> None:
+        # A company that reported last quarter and is merely late this time.
+        recent = EarningsReport("UCG.MI", date(2026, 7, 23), date(2026, 7, 23), 1.8, 1.79, 0.55)
+        ticker = TrackedTicker("UCG.MI", Label.HELD, date(2026, 10, 22), recent.period)
+
+        decision = classify(ticker, recent, date(2026, 10, 26))
+
+        assert decision.outcome is Outcome.OVERDUE
+        assert is_source_stale(decision, date(2026, 10, 26)) is False
+
+    def test_a_result_for_this_cycle_ends_the_alert(self) -> None:
+        published = EarningsReport("FBK.MI", date(2026, 11, 5), date(2026, 11, 5), 0.3, 0.3, None)
+        ticker = TrackedTicker("FBK.MI", Label.HELD, date(2026, 11, 5), published.period)
+
+        decision = classify(ticker, published, date(2026, 11, 9))
+
+        assert decision.outcome is Outcome.ALREADY_NOTIFIED
+
+    def test_publishing_slightly_early_still_counts(self) -> None:
+        early = EarningsReport("FBK.MI", date(2026, 11, 4), date(2026, 11, 4), 0.3, 0.3, None)
+        ticker = TrackedTicker("FBK.MI", Label.HELD, date(2026, 11, 5), early.period)
+
+        assert classify(ticker, early, date(2026, 11, 9)).outcome is Outcome.ALREADY_NOTIFIED
 
 
 class TestInstrumentsThatNeverReport:

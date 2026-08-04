@@ -21,6 +21,11 @@ WINDOW_CLOSES_DAYS_AFTER = 10
 # How long after the expected date silence stops being normal and becomes reportable.
 OVERDUE_AFTER_DAYS = 3
 
+# Beyond this, the newest result the source holds is not "recent history" but evidence that
+# the source stopped publishing figures for this security. Yahoo does exactly that for some
+# Milan mid-caps: it keeps supplying forward dates while the actuals stop years earlier.
+STALE_HISTORY_DAYS = 400
+
 # A result found on a ticker we have never notified before is treated as genuinely new if
 # it is this recent; older than that, it is history and gets absorbed silently.
 FRESH_RESULT_DAYS = 3
@@ -41,6 +46,10 @@ class Decision:
     report: EarningsReport | None = None
     expected_on: date | None = None
     days_overdue: int | None = None
+    # On OVERDUE: the newest result the source holds, if any. When that is years old the
+    # cause is a gap in the source rather than a company delaying, and saying so turns a
+    # vague "check manually" into a specific, actionable statement.
+    source_last_seen: date | None = None
 
 
 def is_in_window(next_earnings_date: date | None, today: date) -> bool:
@@ -85,18 +94,42 @@ def _silence(
     expected: date | None,
 ) -> Decision:
     already = report is not None and report.period == ticker.last_notified_period
-    if expected is not None:
-        overdue_by = (today - expected).days
-        if overdue_by >= OVERDUE_AFTER_DAYS and not already:
+
+    if expected is not None and (today - expected).days >= OVERDUE_AFTER_DAYS:
+        # The test is whether a result exists *for this reporting cycle*, not whether we
+        # have ever notified anything. Asking the latter suppresses the alert exactly where
+        # it is needed most: a source stuck on a years-old quarter matches
+        # `last_notified_period`, which would read as "already handled" and stay silent.
+        if not _covers_cycle(report, expected):
             return Decision(
                 ticker.symbol,
                 Outcome.OVERDUE,
                 report=report,
                 expected_on=expected,
-                days_overdue=overdue_by,
+                days_overdue=(today - expected).days,
+                source_last_seen=report.reported_date if report else None,
             )
+
     outcome = Outcome.ALREADY_NOTIFIED if already else Outcome.NOT_YET_PUBLISHED
     return Decision(ticker.symbol, outcome, report=report, expected_on=expected)
+
+
+def _covers_cycle(report: EarningsReport | None, expected: date) -> bool:
+    """Whether this result belongs to the reporting round that was expected on `expected`.
+
+    A company may publish slightly early, so anything from the window opening onwards
+    counts; anything before it belongs to an earlier quarter.
+    """
+    if report is None or report.reported_date is None:
+        return False
+    return report.reported_date >= expected - timedelta(days=WINDOW_OPENS_DAYS_BEFORE)
+
+
+def is_source_stale(decision: Decision, today: date) -> bool:
+    """Whether the gap is the source's rather than the company's."""
+    if decision.source_last_seen is None:
+        return False
+    return (today - decision.source_last_seen).days > STALE_HISTORY_DAYS
 
 
 def apply(ticker: TrackedTicker, decision: Decision) -> TrackedTicker:

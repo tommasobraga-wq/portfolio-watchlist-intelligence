@@ -11,9 +11,10 @@ quarter off, so it would read "Q3" over Q2 figures. See the ADR.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
-from .digest import Decision
+from .digest import Decision, is_source_stale
 from .models import Label, Revenue, TickerEarnings
 
 QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}"
@@ -72,12 +73,14 @@ def overdue_subject(decisions: list[Decision]) -> str:
     return f"Risultati attesi e non trovati: {len(decisions)} titoli"
 
 
-def overdue_body(decisions: list[Decision], labels: dict[str, Label]) -> str:
+def overdue_body(
+    decisions: list[Decision],
+    labels: dict[str, Label],
+    today: date | None = None,
+) -> str:
+    today = today or date.today()
     lines = [
         "La data prevista è passata e non risulta alcun risultato pubblicato.",
-        "",
-        "Può voler dire che la società ha rinviato, oppure che la fonte non ha",
-        "ancora i dati: vale una verifica manuale.",
         "",
     ]
     for d in decisions:
@@ -85,10 +88,21 @@ def overdue_body(decisions: list[Decision], labels: dict[str, Label]) -> str:
         lines += [
             f"{d.symbol} — {_LABEL_IT[label]}",
             f"  attesi il    {_day(d.expected_on)} ({d.days_overdue} giorni fa)",
-            f"  fonte        {QUOTE_URL.format(symbol=d.symbol)}",
-            "",
         ]
-    return "\n".join(lines)
+        if is_source_stale(d, today):
+            # A years-old last figure is not a delay: the source stopped publishing this
+            # security's results. Saying so turns a vague prompt into a specific one.
+            lines += [
+                "  causa        la fonte non pubblica i consuntivi di questo titolo",
+                f"               dal {d.source_last_seen:%m/%Y} — è una lacuna nota,",
+                "               non un rinvio della società",
+            ]
+        else:
+            lines.append("  causa        rinvio della società o dati non ancora caricati")
+        lines += [f"  fonte        {QUOTE_URL.format(symbol=d.symbol)}", ""]
+
+    lines.append("In entrambi i casi vale una verifica manuale sul sito della società.")
+    return "\n".join(lines) + "\n"
 
 
 def _track_record(earnings: TickerEarnings) -> str | None:
