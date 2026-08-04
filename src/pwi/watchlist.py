@@ -1,8 +1,11 @@
 """Watchlist persistence.
 
-A JSON file is the v1 store: the watchlist is ~10-15 manually maintained rows. Phase 3
-replaces the aggregation/state logic around it with a custom MCP server; the record shape
-stays the one the ADR fixes.
+A single JSON document is the v1 store: the watchlist is ~10-25 manually maintained rows.
+It is written **encrypted** (`data/watchlist.enc`) because it names which securities are
+actually held — see `vault`. Cleartext is a local convenience only, and gitignored.
+
+Phase 3 replaces the aggregation/state logic around it with a custom MCP server; the record
+shape stays the one the ADR fixes.
 """
 
 from __future__ import annotations
@@ -11,38 +14,49 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
+from . import vault
 from .models import Label, TrackedTicker
 
-DEFAULT_PATH = Path("data/watchlist.json")
+DEFAULT_PATH = Path("data/watchlist.enc")
+PLAINTEXT_PATH = Path("data/watchlist.json")
 
 
-def load(path: Path = DEFAULT_PATH) -> list[TrackedTicker]:
-    rows = json.loads(path.read_text())
-    return [
-        TrackedTicker(
-            symbol=row["symbol"],
-            label=Label(row["label"]),
-            next_earnings_date=_optional_date(row.get("next_earnings_date")),
-            last_notified_period=row.get("last_notified_period"),
-        )
-        for row in rows
-    ]
+def load(path: Path = DEFAULT_PATH, key: str | None = None) -> list[TrackedTicker]:
+    """Read the watchlist, decrypting unless the path is explicitly cleartext `.json`."""
+    raw = path.read_bytes()
+    if path.suffix != ".json":
+        raw = vault.decrypt(raw, key or vault.key_from_env())
+    return [_from_row(row) for row in json.loads(raw)]
 
 
-def save(tickers: list[TrackedTicker], path: Path = DEFAULT_PATH) -> None:
-    payload = [
-        {
-            "symbol": t.symbol,
-            "label": str(t.label),
-            "next_earnings_date": (
-                t.next_earnings_date.isoformat() if t.next_earnings_date else None
-            ),
-            "last_notified_period": t.last_notified_period,
-        }
-        for t in tickers
-    ]
+def save(
+    tickers: list[TrackedTicker],
+    path: Path = DEFAULT_PATH,
+    key: str | None = None,
+) -> None:
+    raw = (json.dumps([_to_row(t) for t in tickers], indent=2) + "\n").encode()
+    if path.suffix != ".json":
+        raw = vault.encrypt(raw, key or vault.key_from_env())
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    path.write_bytes(raw)
+
+
+def _to_row(t: TrackedTicker) -> dict:
+    return {
+        "symbol": t.symbol,
+        "label": str(t.label),
+        "next_earnings_date": (t.next_earnings_date.isoformat() if t.next_earnings_date else None),
+        "last_notified_period": t.last_notified_period,
+    }
+
+
+def _from_row(row: dict) -> TrackedTicker:
+    return TrackedTicker(
+        symbol=row["symbol"],
+        label=Label(row["label"]),
+        next_earnings_date=_optional_date(row.get("next_earnings_date")),
+        last_notified_period=row.get("last_notified_period"),
+    )
 
 
 def _optional_date(value: str | None) -> date | None:

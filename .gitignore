@@ -15,10 +15,13 @@ dist/
 build/
 
 # Local state / data
+# The real watchlist is committed ONLY in its encrypted form
+# (data/watchlist.enc). Any cleartext copy stays local.
 *.db
 *.sqlite3
 data/local/
 data/watchlist.json
+data/*.plain.json
 
 # Claude Code local state (worktrees/ holds full checkouts — never commit it)
 .claude/worktrees/

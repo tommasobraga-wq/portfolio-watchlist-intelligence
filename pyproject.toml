@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Earnings-date tracking and results notification for a personal stock watchlist"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=50.0.0",
     "httpx>=0.28",
     "yfinance>=1.5.2",
 ]
