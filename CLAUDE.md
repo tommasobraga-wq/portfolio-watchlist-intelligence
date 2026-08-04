@@ -4,11 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-The repository currently contains **no code** — only the design document at
-[`docs/adr/adr-portfolio-watchlist-earnings-intelligence.md`](docs/adr/adr-portfolio-watchlist-earnings-intelligence.md).
-It is not yet a git repository, has no build tooling, and no test suite. Read the ADR before
-proposing any structure: it fixes the scope, the data model, and — importantly — *why* each
-data source was chosen. Update this file with real build/test/run commands as soon as tooling lands.
+Phase 1, early. Implemented: the tracked-ticker record (`src/pwi/models.py`), the JSON watchlist
+store (`src/pwi/watchlist.py`), and the direct Alpha Vantage REST client with quota handling
+(`src/pwi/alphavantage.py`). Not built yet: the two scheduled jobs, the custom MCP server, the
+deployment.
+
+Read [`docs/adr/adr-portfolio-watchlist-earnings-intelligence.md`](docs/adr/adr-portfolio-watchlist-earnings-intelligence.md)
+before proposing structure — it fixes the scope, the data model, and *why* each data source was chosen.
+
+## Commands
+
+Python 3.12+, managed with `uv`.
+
+```sh
+uv sync                                        # install deps (incl. dev group)
+uv run pytest                                  # all tests
+uv run pytest tests/test_alphavantage.py::test_parses_quarters   # a single test
+uv run ruff check . && uv run ruff format .    # lint + format
+uv run scripts/check_mi_coverage.py UCG.MI     # Phase 1 coverage probe (costs 1 request)
+```
+
+Secrets come from `.env` (`ALPHAVANTAGE_API_KEY`); `data/watchlist.json` is local and untracked —
+copy `data/watchlist.example.json` to create it.
 
 ## What this project is
 

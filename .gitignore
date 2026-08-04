@@ -1,0 +1,30 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Local state / data
+*.db
+*.sqlite3
+data/local/
+data/watchlist.json
+
+# Claude Code local state (worktrees/ holds full checkouts — never commit it)
+.claude/worktrees/
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
