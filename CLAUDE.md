@@ -60,29 +60,36 @@ Swapping one for a more convenient equivalent defeats the point of the project:
 | Concern | Source | Style being exercised |
 |---|---|---|
 | Fundamentals / company data | S&P Global (Kensho) MCP (already connected) | MCP **client** |
-| Upcoming earnings dates | Alpha Vantage `EARNINGS_CALENDAR`, **called directly** — returns **CSV** | Raw **REST** — auth, rate limiting, parsing |
-| Reported results (actual vs. estimate) | Alpha Vantage `EARNINGS`, **called directly** — returns JSON | Raw **REST** |
+| Earnings dates, results, and (later) prices | **Yahoo Finance undocumented endpoints, called directly** | Raw **REST** — cookie/crumb session, token refresh, defensive parsing |
 | Aggregation / digest / cross-ticker state logic | Custom minimal MCP server (Phase 3) | MCP **server** |
 
-`EARNINGS` returns *only already-reported* quarters — it has no future date, so Calendar Sync cannot
-be built on it. That job needs `EARNINGS_CALENDAR`, a different endpoint in a different format.
-Two endpoints, two parsers.
+**Alpha Vantage was rejected on 2026-08-04 after measurement — do not reinstate it.** Its catalogue
+is 14,243 securities across US exchanges only, with zero foreign-suffix symbols; `UCG.MI` returns no
+earnings *and* an empty `TIME_SERIES_DAILY`. `SYMBOL_SEARCH` is a trap: it returns `CRIN.DEX`,
+`UNCRY`, `0RLS.LON` for these companies, none of which exist in the fundamentals universe — never use
+it to establish coverage. `src/pwi/alphavantage.py` is kept only as the reference pattern for quota
+and error handling.
+
+**Do not replace the hand-written Yahoo client with `yfinance`.** It is a dev dependency and test
+oracle only — comparing against it tells you whether Yahoo changed or the client did. Using it as
+the integration would abstract away the raw-REST work this slot exists to exercise, exactly like
+Alpha Vantage's official MCP server would have.
 
 Alpha Vantage also ships an official MCP server for the same data — using it was explicitly
 rejected, since it would repeat the MCP-client skill already covered by Kensho and leave raw REST
 integration unexercised. The overlap to avoid is in *style*, not in *data*.
 
 Constraints to code against:
-- Alpha Vantage free tier: **25 requests/day**. Budget: Calendar Sync calls `EARNINGS_CALENDAR`
-  *without* `symbol` and with `horizon=3month`, getting every company in **one** CSV and filtering
-  locally — 1 request/week, not one per ticker. Results Watch queries only tickers inside the active
-  window, typically 0–3/day.
-- Quota exhaustion arrives as **HTTP 200** with a `Note`/`Information` key, not an error status —
-  already handled in `alphavantage.py`; keep it that way for any new endpoint.
-- The daily quota is **not** tracked across runs yet; the client only reacts once the API refuses.
-- **Unvalidated assumption:** Alpha Vantage earnings coverage for Milan-listed tickers
-  (`UCG.MI`, `FBK.MI`, `RACE.MI`, `PRY.MI`). Verify with 2–3 `.MI` tickers before building the
-  architecture on top of this source.
+- **Sources go behind `EarningsSource` / `PriceSource` protocols.** No vendor concept — API keys,
+  crumbs, `NaN`, DataFrames — crosses that boundary; `digest.py`, `jobs.py` and the MCP server depend
+  on the protocol only. Derive the protocols from what the jobs actually need (two or three methods),
+  not from every eventuality. This is why a vendor swap stays a one-class change.
+- **Money is `Decimal`, never `float`.** Repeated portfolio valuation accumulates binary
+  floating-point error. EPS tolerates `float`; prices and positions do not.
+- Yahoo requires a **cookie + crumb** handshake and rejects naive requests. Expect to refresh the
+  token and to parse defensively — the endpoints are undocumented and can change without notice.
+- A simulated portfolio is a later phase but already binds source choice: it needs daily prices,
+  dividends and splits from **one** consistent source, since mixing vendors yields incoherent returns.
 
 ## Deployment target
 
@@ -107,11 +114,12 @@ Claude Code. Lambda + EventBridge is deferred to an optional Phase 5, not reject
 
 Each phase is independently shippable; stopping after any one still leaves a usable increment.
 
-1. Local script: read watchlist state via Kensho MCP; validate Alpha Vantage `.MI` coverage.
-2. Alpha Vantage REST: `EARNINGS` (JSON) + `EARNINGS_CALENDAR` (CSV), with rate-limit handling.
+1. ~~Validate Alpha Vantage `.MI` coverage~~ — done, negative, source moved. Kensho MCP read still open.
+2. `EarningsSource`/`PriceSource` protocols + hand-written Yahoo REST client, `yfinance` as oracle.
 3. `pwi.digest` aggregation/state module, wrapped by a minimal custom MCP server.
 4. Both jobs on GitHub Actions, digest over SMTP, state committed back to the repo.
 5. *(optional, later)* Lift the same entry points onto Lambda + EventBridge.
+6. *(intended, later)* Simulated portfolio: positions, daily valuation, performance.
 
 ## Conventions
 

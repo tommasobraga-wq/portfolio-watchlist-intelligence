@@ -5,10 +5,17 @@
 ## Status
 Proposed
 
-**Revised 2026-08-04** — the deployment and delivery sections were rewritten after discovering that
-MCP connectors are not reachable from headless scheduled compute, and that the Gmail connector
-cannot send mail (see *Deployment* and *Alternatives* 4–5). The data-model, scope, and data-source
-decisions are unchanged.
+**Revised 2026-08-04**, twice, both times because a stated assumption failed when tested:
+
+1. Deployment and delivery were rewritten after finding that MCP connectors are unreachable from
+   headless scheduled compute and that the Gmail connector cannot send mail (*Deployment*,
+   *Delivery*, *Alternatives* 4–6).
+2. The earnings data source moved from Alpha Vantage to Yahoo Finance after Phase 1 measured that
+   Alpha Vantage covers no Milan-listed security, for earnings or prices (*Phase 1 outcome*,
+   *Alternatives* 7). Sources are now consumed through `EarningsSource` / `PriceSource` protocols.
+
+The problem statement, data model and scope are unchanged. Both revisions vindicate the original
+decision to mark coverage an *open risk to validate*, not an assumption.
 
 ## Context
 
@@ -29,6 +36,16 @@ For each tracked ticker (held in portfolio or watchlist-only), the system should
 - Buy/sell recommendations or any trading signal.
 - Automatic addition of new tickers to the watchlist (manual only).
 - Automatic sync between the `held`/`watching` label and the real Fineco portfolio. Verified that Fineco's Open Banking API requires a PSD2 PSP license from a National Competent Authority — disproportionate for a personal project. The label is managed manually.
+
+### Known future direction (out of v1, but binding on this ADR)
+
+A **simulated portfolio** tracking positions and performance over time is intended as a later phase.
+It is not in v1 scope, but it is recorded here because it *constrains the decision above*: it
+requires daily prices, dividends and splits, from a single consistent source. Valuing a portfolio
+from two vendors yields subtly incoherent returns — different close conventions, different
+split/dividend adjustment methodology. Any source chosen now must therefore be assessed on price
+coverage as well as earnings coverage, which is why Alpha Vantage's empty `TIME_SERIES_DAILY` for
+`.MI` (below) was disqualifying rather than merely inconvenient.
 
 ## Decision
 
@@ -53,32 +70,79 @@ Calendar tracking and results notification have different cadences and triggers,
 | Concern | Source | Why |
 |---|---|---|
 | Fundamentals / company data | S&P Global (Kensho) MCP — already connected | MCP **client** skill: consuming an existing MCP server |
-| Earnings calendar + actual vs. estimate results | Alpha Vantage `EARNINGS` REST endpoint, called directly (not via their official MCP server) | Raw **REST API** skill: auth, rate-limiting, parsing, without an MCP layer in between |
+| Earnings dates + actual vs. estimate results, and (later) prices | **Yahoo Finance undocumented endpoints, called directly** | Raw **REST API** skill: session/cookie auth, token refresh, defensive parsing |
 | Aggregation / state logic not covered by the above (e.g. computed digest content, cross-ticker rollup) | Custom-built minimal MCP server (Phase 3) | MCP **server** skill: exposing your own tools |
 
-This mapping is deliberate: Alpha Vantage also offers an official MCP server for the same data, but using it here would exercise "MCP client" a second time (after Kensho) while leaving the raw-API skill uncovered. Kensho and Alpha Vantage are complementary in data (fundamentals vs. earnings actuals), not redundant — the overlap to avoid is in *skill*, not in *data*.
+The *skill* mapping is unchanged from the original decision; only the vendor moved. Using a
+ready-made client library (`yfinance`) was rejected for the same reason Alpha Vantage's official MCP
+server was: it would abstract away the raw-integration work this slot exists to exercise. It is kept
+as a **dev dependency and test oracle** — when the hand-written client breaks, comparing against
+`yfinance` says whether Yahoo changed or we did.
 
-**Correction: `EARNINGS` alone is not sufficient.** The `EARNINGS` endpoint returns *already reported*
-quarters only; it carries no future date, so Calendar Sync cannot be built on it. The upcoming-date
-half of the problem needs `EARNINGS_CALENDAR`, a separate endpoint that responds in **CSV, not JSON**.
-The two jobs therefore use two different endpoints with two different parsers. This does not change
-the "raw REST, no MCP layer" decision — if anything it strengthens it, since handling a second
-response format is exactly the integration work the project set out to exercise.
+#### Phase 1 outcome: Alpha Vantage rejected on coverage (verified 2026-08-04)
 
-**Open risk to validate in Phase 1, not assumed:** Alpha Vantage's earnings-data coverage for Milan-listed tickers (UCG.MI, FBK.MI, RACE.MI, PRY.MI) is unconfirmed. Test with 2–3 Italian tickers before committing the architecture around this source.
+The original choice was Alpha Vantage `EARNINGS`. Phase 1 existed to validate its Milan coverage
+rather than assume it, and the answer was negative. Measured, not inferred:
 
-**Quota budget.** Free tier is capped at 25 requests/day, which is comfortable once the two jobs are
-budgeted separately:
+- `LISTING_STATUS` returns **14,243 securities across NASDAQ, NYSE, BATS, AMEX, NYSE ARCA and NYSE MKT
+  only** — no other exchange, and **zero** symbols carrying a foreign-exchange suffix.
+- `UCG.MI` returns no earnings data. IBM, used as a control, returns 122 quarters, so the key and
+  client were working.
+- `EARNINGS_CALENDAR` is 4,782 USD rows out of 4,789. None of UniCredit, Ferrari, Fineco or Prysmian
+  appear.
+- `TIME_SERIES_DAILY` for `UCG.MI` returns an empty object — **prices are uncovered too**, not just
+  fundamentals.
 
-- *Calendar Sync*: `EARNINGS_CALENDAR` called **without** a `symbol` and with `horizon=3month` returns
-  every covered company in a single CSV. Filtering to the watchlist happens locally, so the cost is
-  **1 request/week**, not one per ticker.
-- *Results Watch*: `EARNINGS` is per-symbol, but only tickers whose `next_earnings_date` falls inside
-  the active window are queried — typically 0–3/day, 5–8/day at the mid-Feb / mid-May / early-Aug /
-  mid-Nov peaks.
+`SYMBOL_SEARCH` is a trap worth recording: it happily returns `CRIN.DEX`, `UNCRY`, `0RLS.LON` for
+these companies, none of which exist in the fundamentals universe. The search index is far broader
+than the data, so it cannot be used to establish coverage.
 
-Worst case stays well under the cap. Rate-limit handling is still explicit, because Alpha Vantage
-signals quota exhaustion with HTTP 200 plus a `Note`/`Information` key rather than an error status.
+A second, independent defect surfaced: `EARNINGS_CALENDAR` (4,789 entries) is much narrower than the
+listing universe (14,243), and `RACE` — NYSE-listed, 44 quarters of history, reported 8 days prior —
+has **no calendar entry at all**. The forward-date half was therefore unreliable even for covered US
+names, which alone would have blocked Calendar Sync.
+
+#### Why Yahoo, and what it costs
+
+Verified against the actual watchlist: forward earnings dates and EPS estimates for all four `.MI`
+tickers, 25 quarters of history with estimate / reported / surprise %, plus daily prices, dividends
+and splits. One source covers both the current scope and the intended portfolio extension.
+
+It carries a real, accepted risk: the endpoints are undocumented, Yahoo's terms discourage automated
+access, and anti-bot measures (cookie + crumb) are active and were observed rejecting naive requests.
+This is accepted for a personal, non-commercial project that redistributes nothing. The expected
+failure mode is "stops working one day", and the fallbacks are mapped in advance:
+
+| Half | Fallback if Yahoo breaks | Cost |
+|---|---|---|
+| Earnings calendar (`.MI`) | Borsa Italiana's own corporate calendar — regulatory filing, PDF | €0, awkward parsing |
+| Daily prices (`.MI`) | A worldwide EOD plan (e.g. EODHD) | ~€17–20/month |
+
+Surveyed and rejected on coverage or price: Twelve Data (free tier is 3 markets / trial symbols,
+earnings from Pro+), EODHD (worldwide EOD from ~€20/mo but the calendar only in a €99.99 bundle),
+Financial Modeling Prep (free tier US-only, calendar is premium), Finnhub (international is paid).
+The pattern is structural rather than incidental: Euronext licenses Borsa Italiana data, so no
+commercial provider gives it away. Stooq, a free CSV alternative for prices, is behind a JavaScript
+bot challenge and unusable headlessly.
+
+### Source abstraction: `EarningsSource` and `PriceSource`
+
+Data sources are consumed through two narrow `Protocol`s stated in domain terms — "next earnings
+date", "latest reported quarter", "daily closes" — with no vendor concept (API keys, crumbs, CSV,
+`NaN`, DataFrames) crossing the boundary. Jobs, digest logic and the MCP server depend on the
+protocol; each vendor is one implementation behind it.
+
+This is not speculative abstraction. Within a single day this project selected a source, built a
+client against it, and found it unfit for the perimeter; the replacement is explicitly fragile and
+its paid successor is already identified. Swapping vendors must stay a one-class change. The
+protocols are also what let the interesting logic — notification de-duplication, the active window,
+first-run bootstrap — be tested offline against fakes, with no network and no live quarter to wait for.
+
+The protocols are to be **derived from what the jobs actually require** (two or three methods), not
+designed up front for every eventuality.
+
+**Money is `Decimal`, never `float`** — repeated portfolio valuation accumulates binary
+floating-point error. EPS values tolerate `float`; positions and prices do not.
 
 ### Deployment: GitHub Actions, headless
 
@@ -147,7 +211,9 @@ outside the scheduled path.
 - Serverless deployment, one of the stated learning goals, is deferred to an optional Phase 5 rather than delivered in v1.
 - Committing state back to the repository means the watchlist is public if the repository is, and every run produces a commit — acceptable for a personal watchlist of 10–15 symbols, but it is a real coupling of data to version control.
 - A Gmail app password is a long-lived, broadly-scoped credential. It lives only as a GitHub Actions secret, but it is weaker isolation than a scoped OAuth token.
-- Two Alpha Vantage endpoints in two response formats (JSON and CSV) mean two parsers to maintain instead of one.
+- **The whole system rests on undocumented, actively defended endpoints.** Yahoo can break the client without notice, and the same break takes out both earnings and (later) portfolio valuation. Gaps in a price series propagate into wrong returns, which is worse than a missed notification because it is silent. The `PriceSource` / `EarningsSource` protocols exist to bound the blast radius; the fallbacks and their cost are mapped above.
+- Accepting a source whose terms discourage automated access is a deliberate compromise, justified only by this being personal, non-commercial and non-redistributing. It would not be acceptable for anything shared or published.
+- The free-tier landscape means the project is free today but has a known price if it must move: ~€17–20/month for prices, €0 plus awkward PDF parsing for the calendar.
 
 ## Alternatives considered and rejected
 
@@ -157,15 +223,19 @@ outside the scheduled path.
 4. **Lambda + EventBridge for the scheduled jobs** — deferred, not rejected on merit. It is the right choice when the *goal* is practising AWS infrastructure, but it is more setup for an identical functional result, and serverless is a secondary goal here. The jobs are plain CLI entry points, so migrating later is a packaging exercise, not a rewrite. Revisit as a follow-up phase.
 5. **Gmail MCP for delivery** — rejected on two independent grounds: it is unreachable from headless scheduled compute, and the connector has no send capability (drafts only). Neither is a limitation that better code could work around.
 6. **A Claude scheduled cloud agent instead of GitHub Actions** — this *would* keep MCP connectors available in a scheduled context, but it puts a model in the loop for what is deterministic work (fetch, compare, format), and the Gmail send limitation applies regardless. Rejected as the wrong tool for a fixed-logic job.
+7. **Alpha Vantage as the earnings source** — rejected after measurement; see *Phase 1 outcome*. Retained here because the reasoning that selected it was sound and only the coverage assumption failed.
+8. **An LLM + web-search job instead of a structured API** — this mirrors how the task is done manually today and has no coverage limit, since it can read Borsa Italiana, company IR pages or the financial press for any ticker. Rejected for unattended operation: it is non-deterministic, its failure mode is a *plausible wrong answer* rather than an error, and around an expected reporting date the web is full of preview articles that are hard to distinguish from actual published results — risking notifications for results that were never released. The manual method works because a human is in the loop supplying plausibility checks and source judgement; automating it removes exactly that. It is also unusable for the intended portfolio extension, which needs consistent daily price series. Revisit only as a *fallback* for tickers no API covers, never as the primary path.
+9. **`yfinance` as the client library** — rejected as the primary integration for the same reason as Alpha Vantage's official MCP server: it abstracts away the raw-REST work this slot exists to exercise. Retained as a dev dependency and test oracle.
 
 ## Implementation phases
 
 | Phase | Deliverable | Skill exercised |
 |---|---|---|
-| 1 | Local script: pull watchlist state via Kensho MCP; validate Alpha Vantage earnings coverage for .MI tickers | MCP client |
-| 2 | Alpha Vantage REST integration: `EARNINGS` (JSON, reported results) + `EARNINGS_CALENDAR` (CSV, upcoming dates), with rate-limit handling | Direct API integration |
+| 1 | ~~Validate Alpha Vantage `.MI` coverage~~ — **done 2026-08-04, negative**; source moved to Yahoo. Kensho MCP read of watchlist state still outstanding | MCP client |
+| 2 | `EarningsSource` / `PriceSource` protocols + hand-written Yahoo REST client (cookie/crumb session, defensive parsing), with `yfinance` as test oracle | Direct API integration |
 | 3 | `pwi.digest` aggregation/state module, wrapped by a minimal custom MCP server for interactive use | MCP server |
 | 4 | Both jobs scheduled on GitHub Actions, digest delivered over SMTP, state committed back to the repo | CI/CD + scheduling |
 | 5 *(optional, later)* | Lift the same entry points onto Lambda + EventBridge | Serverless deployment |
+| 6 *(intended, later)* | Simulated portfolio: positions, daily valuation, performance over time | Data modelling over a time series |
 
 Each phase is independently shippable; stopping after any phase still yields a usable increment.
