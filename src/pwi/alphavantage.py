@@ -8,7 +8,6 @@ MCP client.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
 from datetime import date, datetime
 
 import httpx
@@ -40,6 +39,8 @@ class AlphaVantageClient:
     ) -> None:
         self._api_key = api_key
         self._client = client or httpx.Client(timeout=30.0)
+        # An injected client belongs to the caller, who may reuse it after we are done.
+        self._owns_client = client is None
         self._min_interval = min_interval
         self._last_call: float | None = None
 
@@ -78,7 +79,8 @@ class AlphaVantageClient:
         return bool(self.earnings(symbol))
 
     def close(self) -> None:
-        self._client.close()
+        if self._owns_client:
+            self._client.close()
 
     def __enter__(self) -> AlphaVantageClient:
         return self
@@ -116,8 +118,3 @@ def _optional_float(value: str | None) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except ValueError:
         return None
-
-
-def batched(symbols: list[str], size: int) -> Iterator[list[str]]:
-    for start in range(0, len(symbols), size):
-        yield symbols[start : start + size]

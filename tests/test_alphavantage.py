@@ -63,6 +63,25 @@ def test_uncovered_symbol_returns_empty(client: AlphaVantageClient) -> None:
     assert client.covers("UCG.MI") is False
 
 
+def test_injected_client_is_left_open() -> None:
+    # The caller owns an injected client and may keep using it after we are done.
+    injected = httpx.Client()
+
+    with AlphaVantageClient("test-key", client=injected, min_interval=0.0):
+        pass
+
+    assert not injected.is_closed
+
+
+def test_own_client_is_closed() -> None:
+    client = AlphaVantageClient("test-key", min_interval=0.0)
+
+    with client:
+        pass
+
+    assert client._client.is_closed
+
+
 @respx.mock
 def test_quota_message_raises_rate_limited(client: AlphaVantageClient) -> None:
     # The quota response is HTTP 200 with an informational key, not an error status.

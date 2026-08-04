@@ -20,6 +20,10 @@ build/
 data/local/
 data/watchlist.json
 
+# Claude Code local state (worktrees/ holds full checkouts — never commit it)
+.claude/worktrees/
+.claude/settings.local.json
+
 # OS / editor
 .DS_Store
 .idea/
