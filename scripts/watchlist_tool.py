@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """Manage the encrypted watchlist.
 
-    uv run scripts/watchlist_tool.py generate-key      # once, then store it
-    uv run scripts/watchlist_tool.py edit              # decrypt, open $EDITOR, re-encrypt
-    uv run scripts/watchlist_tool.py show              # print to stdout
-    uv run scripts/watchlist_tool.py encrypt <file>    # import a cleartext JSON
+    uv run scripts/watchlist_tool.py generate-key                    # once, then store it
+    uv run scripts/watchlist_tool.py add UCG.MI:held RACE.MI:watching
+    uv run scripts/watchlist_tool.py remove FBK.MI
+    uv run scripts/watchlist_tool.py show
+    uv run scripts/watchlist_tool.py edit                            # $EDITOR, full JSON
+    uv run scripts/watchlist_tool.py encrypt <file.json>             # import cleartext
 
 `edit` writes the cleartext to a temporary file that is removed afterwards, so the holdings
 never sit on disk in the repository.
@@ -20,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from pwi import vault
+from pwi.models import Label, TrackedTicker
 from pwi.watchlist import DEFAULT_PATH, load, save
 
 
@@ -61,6 +64,53 @@ def edit() -> int:
     return 0
 
 
+def add(pairs: list[str]) -> int:
+    """Add or relabel tickers: `add UCG.MI:held RACE.MI:watching`.
+
+    Existing rows keep their accumulated state; only the label is updated, so relabelling
+    a ticker after a trade never resets its notification history.
+    """
+    key = vault.key_from_env()
+    current = load(DEFAULT_PATH, key=key) if DEFAULT_PATH.exists() else []
+    by_symbol = {t.symbol: t for t in current}
+
+    for pair in pairs:
+        symbol, _, raw_label = pair.partition(":")
+        symbol = symbol.strip().upper()
+        label_text = (raw_label or "watching").strip().lower()
+        if label_text not in ("held", "watching"):
+            print(f"{pair}: label must be 'held' or 'watching'", file=sys.stderr)
+            return 2
+        label = Label(label_text)
+
+        existing = by_symbol.get(symbol)
+        if existing is None:
+            by_symbol[symbol] = TrackedTicker(symbol, label)
+            print(f"added    {symbol} ({label_text})")
+        elif existing.label != label:
+            existing.label = label
+            print(f"relabel  {symbol} -> {label_text}")
+        else:
+            print(f"unchanged {symbol}")
+
+    save(list(by_symbol.values()), DEFAULT_PATH, key=key)
+    print(f"\n{len(by_symbol)} tickers -> {DEFAULT_PATH} (encrypted)")
+    return 0
+
+
+def remove(symbols: list[str]) -> int:
+    key = vault.key_from_env()
+    current = load(DEFAULT_PATH, key=key)
+    wanted = {s.strip().upper() for s in symbols}
+    kept = [t for t in current if t.symbol not in wanted]
+
+    for missing in wanted - {t.symbol for t in current}:
+        print(f"not present: {missing}", file=sys.stderr)
+    save(kept, DEFAULT_PATH, key=key)
+    print(f"{len(current) - len(kept)} removed, {len(kept)} remaining")
+    return 0
+
+
 def encrypt_file(source: str) -> int:
     save(load(Path(source), key="unused"), DEFAULT_PATH)
     print(f"{source} -> {DEFAULT_PATH} (encrypted)")
@@ -86,11 +136,17 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     command = argv[1]
+    rest = argv[2:]
     if command == "encrypt":
-        if len(argv) < 3:
+        if not rest:
             print("usage: watchlist_tool.py encrypt <file.json>", file=sys.stderr)
             return 2
-        return encrypt_file(argv[2])
+        return encrypt_file(rest[0])
+    if command in ("add", "remove"):
+        if not rest:
+            print(f"usage: watchlist_tool.py {command} <symbol...>", file=sys.stderr)
+            return 2
+        return add(rest) if command == "add" else remove(rest)
     if command not in COMMANDS:
         print(f"unknown command: {command}\n\n{__doc__}", file=sys.stderr)
         return 2
