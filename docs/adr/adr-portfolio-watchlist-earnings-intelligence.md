@@ -70,14 +70,31 @@ Calendar tracking and results notification have different cadences and triggers,
 | Concern | Source | Why |
 |---|---|---|
 | Fundamentals / company data | S&P Global (Kensho) MCP — already connected | MCP **client** skill: consuming an existing MCP server |
-| Earnings dates + actual vs. estimate results, and (later) prices | **Yahoo Finance undocumented endpoints, called directly** | Raw **REST API** skill: session/cookie auth, token refresh, defensive parsing |
+| Earnings dates + actual vs. estimate results, and (later) prices | **Yahoo Finance via `yfinance`** | The only source verified to cover the actual watchlist at zero cost |
 | Aggregation / state logic not covered by the above (e.g. computed digest content, cross-ticker rollup) | Custom-built minimal MCP server (Phase 3) | MCP **server** skill: exposing your own tools |
 
-The *skill* mapping is unchanged from the original decision; only the vendor moved. Using a
-ready-made client library (`yfinance`) was rejected for the same reason Alpha Vantage's official MCP
-server was: it would abstract away the raw-integration work this slot exists to exercise. It is kept
-as a **dev dependency and test oracle** — when the hand-written client breaks, comparing against
-`yfinance` says whether Yahoo changed or we did.
+#### The raw-REST skill is set aside in v1 — deliberately
+
+This slot originally existed to exercise raw REST integration. That goal is **dropped for now**, and
+the reasoning is recorded so it is not silently reintroduced:
+
+- A hand-written client cannot talk to Yahoo. Yahoo fingerprints the **TLS handshake (JA3/JA4)**, not
+  just cookies and headers; `yfinance`'s own HTTP layer documents this and ships `curl_cffi` for
+  browser impersonation. Measured: `httpx` received HTTP 429 on every endpoint — including `chart`,
+  which needs no crumb — across three retries over nine minutes. No amount of correct HTTP fixes it.
+- Writing that client would therefore mean deliberately defeating bot detection, which is a different
+  activity from API integration, and would teach evasion rather than the intended skill.
+- A documented, paid API would exercise the skill properly, but the cheapest option covering Milan,
+  earnings and prices is Twelve Data Pro at $99/month — **out of budget** — and EODHD (~€40/month
+  à la carte) does not list Milan among its supported markets at all.
+
+**Priority, stated plainly:** a working unattended notifier for the real watchlist outranks the
+learning goal. The MCP-client and MCP-server skills remain exercised. Raw REST can be revisited if a
+covered, affordable, documented API appears, or in a later phase against a different target.
+
+Consequently `yfinance` is a **runtime dependency**, not a test oracle, and `alphavantage.py` is
+retired: it covers no Milan security, and keeping a second source alive purely to exercise a skill
+would be complexity without functional benefit.
 
 #### Phase 1 outcome: Alpha Vantage rejected on coverage (verified 2026-08-04)
 
@@ -225,14 +242,16 @@ outside the scheduled path.
 6. **A Claude scheduled cloud agent instead of GitHub Actions** — this *would* keep MCP connectors available in a scheduled context, but it puts a model in the loop for what is deterministic work (fetch, compare, format), and the Gmail send limitation applies regardless. Rejected as the wrong tool for a fixed-logic job.
 7. **Alpha Vantage as the earnings source** — rejected after measurement; see *Phase 1 outcome*. Retained here because the reasoning that selected it was sound and only the coverage assumption failed.
 8. **An LLM + web-search job instead of a structured API** — this mirrors how the task is done manually today and has no coverage limit, since it can read Borsa Italiana, company IR pages or the financial press for any ticker. Rejected for unattended operation: it is non-deterministic, its failure mode is a *plausible wrong answer* rather than an error, and around an expected reporting date the web is full of preview articles that are hard to distinguish from actual published results — risking notifications for results that were never released. The manual method works because a human is in the loop supplying plausibility checks and source judgement; automating it removes exactly that. It is also unusable for the intended portfolio extension, which needs consistent daily price series. Revisit only as a *fallback* for tickers no API covers, never as the primary path.
-9. **`yfinance` as the client library** — rejected as the primary integration for the same reason as Alpha Vantage's official MCP server: it abstracts away the raw-REST work this slot exists to exercise. Retained as a dev dependency and test oracle.
+9. **A hand-written Yahoo REST client** — rejected on evidence, not preference: Yahoo blocks on TLS fingerprint, so `httpx` is refused regardless of correct cookie/crumb handling (429 on all endpoints across three retries). Building it would require browser impersonation via `curl_cffi`, i.e. defeating bot detection. `yfinance` is adopted instead as a runtime dependency.
+10. **A paid API to get a legitimate raw-REST integration** — rejected on budget. Twelve Data Pro ($99/month) is the cheapest tier combining EU markets, earnings and dividends/splits; EODHD à la carte is ~€40/month but its published market list omits Milan entirely, so it may not even cover the perimeter. Not worth the spend for a personal project.
+11. **Keeping Alpha Vantage alongside Yahoo for the US subset** — considered, since earnings are discrete events and mixing sources there causes no inconsistency (unlike prices, where one source is mandatory). Rejected: it would exist purely to keep the raw-REST skill alive, adding a second source, a composite and a fallback path for no functional gain. Simplicity of an unattended job wins.
 
 ## Implementation phases
 
 | Phase | Deliverable | Skill exercised |
 |---|---|---|
 | 1 | ~~Validate Alpha Vantage `.MI` coverage~~ — **done 2026-08-04, negative**; source moved to Yahoo. Kensho MCP read of watchlist state still outstanding | MCP client |
-| 2 | `EarningsSource` / `PriceSource` protocols + hand-written Yahoo REST client (cookie/crumb session, defensive parsing), with `yfinance` as test oracle | Direct API integration |
+| 2 | `EarningsSource` / `PriceSource` protocols + `yfinance`-backed implementation | — (raw REST set aside; see above) |
 | 3 | `pwi.digest` aggregation/state module, wrapped by a minimal custom MCP server for interactive use | MCP server |
 | 4 | Both jobs scheduled on GitHub Actions, digest delivered over SMTP, state committed back to the repo | CI/CD + scheduling |
 | 5 *(optional, later)* | Lift the same entry points onto Lambda + EventBridge | Serverless deployment |

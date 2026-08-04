@@ -5,10 +5,12 @@ description = "Earnings-date tracking and results notification for a personal st
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
+    "yfinance>=1.5.2",
 ]
 
 [dependency-groups]
 dev = [
+    "lxml>=6.1.1",
     "pytest>=8.3",
     "respx>=0.22",
     "ruff>=0.9",
