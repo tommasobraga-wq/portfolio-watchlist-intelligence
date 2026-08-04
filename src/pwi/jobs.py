@@ -19,13 +19,13 @@ import logging
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from . import digest, render, watchlist
 from .mailer import Mailer
 from .models import TrackedTicker
-from .sources import EarningsSource, SourceUnavailable
+from .sources import EarningsSource, PriceSource, SourceUnavailable
 
 log = logging.getLogger("pwi")
 
@@ -105,6 +105,7 @@ def results_watch(
     today: date | None = None,
     delay: float = DELAY_BETWEEN_LOOKUPS,
     persist: bool = True,
+    prices: PriceSource | None = None,
 ) -> RunSummary:
     """Detect published results and notify.
 
@@ -132,7 +133,7 @@ def results_watch(
         decision = digest.classify(ticker, earnings.latest, today)
 
         if decision.outcome is digest.Outcome.NOTIFY:
-            if _announce(mailer, decision, labels[ticker.symbol], earnings, source):
+            if _announce(mailer, decision, labels[ticker.symbol], earnings, source, prices, today):
                 _apply(tickers, ticker, decision)
                 summary.notified += 1
         elif decision.outcome is digest.Outcome.ADOPTED:
@@ -165,18 +166,36 @@ def _announce(
     label,
     earnings,
     source: EarningsSource,
+    prices: PriceSource | None,
+    today: date,
 ) -> bool:
-    """Send one result. Returns whether it was delivered, which gates the state write."""
+    """Send one result. Returns whether it was delivered, which gates the state write.
+
+    Everything beyond the EPS figures is enrichment: if a lookup for it fails, the section
+    is dropped and the result still goes out. A missing detail must never cost the reader
+    the notification itself.
+    """
     try:
         revenue = source.revenue(decision.symbol)
     except SourceUnavailable:
-        # Revenue is enrichment; never let its absence hold back the result itself.
         revenue = None
+
+    reaction = None
+    if prices is not None and decision.report and decision.report.reported_date:
+        try:
+            closes = prices.daily_closes(
+                decision.symbol,
+                decision.report.reported_date - timedelta(days=7),
+                today,
+            )
+            reaction = digest.reaction(closes, decision.report.reported_date)
+        except SourceUnavailable:
+            reaction = None
 
     try:
         mailer.send(
             render.result_subject(decision, label),
-            render.result_body(decision, label, earnings=earnings, revenue=revenue),
+            render.result_body(decision, label, earnings=earnings, revenue=revenue, price=reaction),
         )
     except Exception:
         # Deliberately not stamping: the quarter stays unnotified and is retried next run.

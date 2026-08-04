@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -82,6 +82,27 @@ class TickerEarnings:
     @property
     def latest(self) -> EarningsReport | None:
         return self.published[0] if self.published else None
+
+    def year_before(self, report: EarningsReport) -> EarningsReport | None:
+        """The comparable quarter a year earlier, for a like-for-like comparison.
+
+        Matched by proximity to the same date one year back rather than by counting four
+        rows, because a company that skipped or delayed a quarter would put the count out
+        of step and compare the wrong periods.
+        """
+        if report.reported_date is None:
+            return None
+        target = report.reported_date - timedelta(days=365)
+        candidates = [
+            r
+            for r in self.published
+            if r.reported_date is not None
+            and r is not report
+            and abs((r.reported_date - target).days) <= 45
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda r: abs((r.reported_date - target).days))
 
     def track_record(self, quarters: int = 4) -> tuple[int, int]:
         """How often the company beat its estimate recently, as (beats, comparable)."""

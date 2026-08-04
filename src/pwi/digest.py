@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from enum import StrEnum
 
 from .models import EarningsReport, TrackedTicker
@@ -50,6 +51,51 @@ class Decision:
     # cause is a gap in the source rather than a company delaying, and saying so turns a
     # vague "check manually" into a specific, actionable statement.
     source_last_seen: date | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PriceReaction:
+    """How the market took the result. Any field may be None when prices are missing."""
+
+    before: Decimal | None = None
+    on_day: Decimal | None = None
+    latest: Decimal | None = None
+    day_move_pct: float | None = None
+    since_move_pct: float | None = None
+
+
+def reaction(closes: dict[date, Decimal], published_on: date | None) -> PriceReaction:
+    """Compare the close on the day of publication with the one before, and with today.
+
+    Beating an estimate and falling anyway is common and not deducible from EPS, so the
+    move is worth stating. Gaps are respected: the reference is the last close *before*
+    publication, whatever day that was — weekends and holidays are simply not there.
+    """
+    if not closes or published_on is None:
+        return PriceReaction()
+
+    earlier = [d for d in closes if d < published_on]
+    before = closes[max(earlier)] if earlier else None
+    # A company reporting before the open moves the price that same session; one reporting
+    # after the close moves it the next. Taking the first close on or after publication
+    # covers both without needing to know which it was.
+    on_or_after = [d for d in closes if d >= published_on]
+    on_day = closes[min(on_or_after)] if on_or_after else None
+    latest = closes[max(closes)]
+
+    return PriceReaction(
+        before=before,
+        on_day=on_day,
+        latest=latest,
+        day_move_pct=_pct(before, on_day),
+        since_move_pct=_pct(on_day, latest),
+    )
+
+
+def _pct(start: Decimal | None, end: Decimal | None) -> float | None:
+    if start is None or end is None or start == 0:
+        return None
+    return float((end - start) / start * 100)
 
 
 def is_in_window(next_earnings_date: date | None, today: date) -> bool:

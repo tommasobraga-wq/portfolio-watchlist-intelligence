@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from pwi.digest import Decision, Outcome
+from pwi.digest import Decision, Outcome, PriceReaction
 from pwi.models import EarningsReport, Label, Revenue, TickerEarnings
 from pwi.render import (
     overdue_body,
@@ -66,15 +66,50 @@ class TestBody:
 
         assert "Q3" not in text and "Q2" not in text
 
-    def test_track_record_summarises_recent_quarters(self) -> None:
+    def test_recent_quarters_are_tabulated(self) -> None:
         text = result_body(decision(), Label.HELD, earnings=HISTORY)
 
-        assert "ha superato le attese in 3 degli ultimi 4 trimestri" in text
+        assert "ULTIMI TRIMESTRI" in text
+        assert "2,09 su 1,85" in text
+        assert "1,09 su 1,21" in text
 
-    def test_track_record_is_omitted_when_too_thin_to_mean_anything(self) -> None:
+    def test_the_table_is_omitted_when_too_thin_to_be_a_table(self) -> None:
         thin = TickerEarnings("UCG.MI", published=(report(),))
 
-        assert "trimestri" not in result_body(decision(), Label.HELD, earnings=thin)
+        assert "ULTIMI TRIMESTRI" not in result_body(decision(), Label.HELD, earnings=thin)
+
+    def test_year_on_year_compares_the_same_quarter(self) -> None:
+        # Matched by date proximity, not by counting rows: a skipped quarter would
+        # otherwise line up the wrong periods.
+        last_year = EarningsReport(
+            "UCG.MI", date(2025, 7, 23), date(2025, 7, 23), 2.03, 1.62, 25.46
+        )
+        earnings = TickerEarnings("UCG.MI", published=(report(), last_year))
+
+        text = result_body(decision(), Label.HELD, earnings=earnings)
+
+        assert "anno su anno 1,80 contro 2,03" in text
+        assert "-11,33%" in text
+
+    def test_price_reaction_shows_a_fall_after_a_beat(self) -> None:
+        # The whole reason for this section: EPS beat, stock down. Invisible otherwise.
+        price = PriceReaction(
+            before=Decimal("83.21"),
+            on_day=Decimal("79.22"),
+            latest=Decimal("85.17"),
+            day_move_pct=-4.7951,
+            since_move_pct=7.5108,
+        )
+
+        text = result_body(decision(), Label.HELD, price=price)
+
+        assert "REAZIONE DEL TITOLO" in text
+        assert "-4,80%" in text
+        assert "83,21 → 79,22" in text
+        assert "+7,51%" in text
+
+    def test_price_section_is_omitted_when_prices_are_missing(self) -> None:
+        assert "REAZIONE" not in result_body(decision(), Label.HELD, price=PriceReaction())
 
     def test_missing_revenue_is_stated_as_a_source_lag(self) -> None:
         # Silence here would read as "no revenue", which is wrong and alarming.

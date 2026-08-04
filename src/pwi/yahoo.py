@@ -11,7 +11,7 @@ never crosses into the rest of the package.
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -100,6 +100,52 @@ class YahooEarnings:
             return get(self._ticker(symbol))
         except Exception as exc:  # yfinance raises a wide and unstable set of errors
             raise SourceUnavailable(f"Yahoo lookup failed for {symbol}: {exc}") from exc
+
+
+class YahooPrices:
+    """Satisfies `PriceSource`.
+
+    Split- and dividend-adjusted closes, which is what makes a move across a corporate
+    action mean anything. Days the market was shut are simply absent — never filled in,
+    because an invented price becomes a wrong return.
+    """
+
+    def __init__(self, download: Any = None) -> None:
+        if download is None:
+            import yfinance
+
+            download = yfinance.download
+        self._download = download
+
+    def daily_closes(self, symbol: str, start: date, end: date) -> dict[date, Decimal]:
+        try:
+            frame = self._download(
+                symbol,
+                start=start.isoformat(),
+                # yfinance treats `end` as exclusive; we mean it inclusive.
+                end=(end + timedelta(days=1)).isoformat(),
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
+        except Exception as exc:
+            raise SourceUnavailable(f"Yahoo prices failed for {symbol}: {exc}") from exc
+
+        if frame is None or frame.empty or "Close" not in frame:
+            return {}
+
+        closes = frame["Close"]
+        # A multi-symbol download returns a column per ticker; a single one may do either.
+        if hasattr(closes, "columns"):
+            if symbol not in closes.columns:
+                return {}
+            closes = closes[symbol]
+
+        out: dict[date, Decimal] = {}
+        for index, value in closes.items():
+            if not _is_missing(value):
+                out[_as_date(index)] = _as_decimal(value)
+        return out
 
 
 def _is_missing(value: Any) -> bool:

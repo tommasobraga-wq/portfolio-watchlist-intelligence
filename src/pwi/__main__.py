@@ -15,7 +15,7 @@ import warnings
 from . import jobs
 from .config import load_environment
 from .mailer import Mailer
-from .yahoo import YahooEarnings
+from .yahoo import YahooEarnings, YahooPrices
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     mailer = _PrintingMailer() if args.dry_run else Mailer.from_env()
-    jobs.results_watch(source, mailer, persist=not args.dry_run)
+    jobs.results_watch(source, mailer, persist=not args.dry_run, prices=YahooPrices())
     return 0
 
 

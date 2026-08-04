@@ -14,8 +14,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from .digest import Decision, is_source_stale
-from .models import Label, Revenue, TickerEarnings
+from .digest import Decision, PriceReaction, is_source_stale
+from .models import EarningsReport, Label, Revenue, TickerEarnings
 
 QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}"
 _LABEL_IT = {Label.HELD: "in portafoglio", Label.WATCHING: "osservato"}
@@ -35,6 +35,7 @@ def result_body(
     label: Label,
     earnings: TickerEarnings | None = None,
     revenue: Revenue | None = None,
+    price: PriceReaction | None = None,
 ) -> str:
     report = decision.report
     assert report is not None
@@ -49,6 +50,20 @@ def result_body(
     ]
     if surprise := _surprise(report):
         lines.append(f"  scarto       {surprise}")
+    if earnings and (yoy := _year_on_year(earnings, report)):
+        lines.append(f"  anno su anno {yoy}")
+
+    if price and price.day_move_pct is not None:
+        # Beating the estimate and falling anyway is common, and invisible from EPS alone.
+        lines += ["", "REAZIONE DEL TITOLO"]
+        lines.append(
+            f"  pubblicazione {_pct(price.day_move_pct)}"
+            f"   ({_price(price.before)} → {_price(price.on_day)})"
+        )
+        if price.since_move_pct is not None:
+            lines.append(
+                f"  da allora     {_pct(price.since_move_pct)}   (→ {_price(price.latest)})"
+            )
 
     if revenue and (revenue.actual is not None or revenue.estimate is not None):
         lines += ["", "RICAVI"]
@@ -60,11 +75,30 @@ def result_body(
         if revenue.estimate is not None:
             lines.append(f"  atteso       {_money(revenue.estimate)}")
 
-    if earnings and (record := _track_record(earnings)):
-        lines += ["", "STORICO", f"  {record}"]
+    if earnings and (table := _recent_quarters(earnings)):
+        lines += ["", "ULTIMI TRIMESTRI"] + table
 
     lines += ["", f"Fonte: {QUOTE_URL.format(symbol=decision.symbol)}"]
     return "\n".join(lines) + "\n"
+
+
+def _year_on_year(earnings: TickerEarnings, report: EarningsReport) -> str | None:
+    previous = earnings.year_before(report)
+    if previous is None or previous.reported_eps is None or not report.reported_eps:
+        return None
+    change = (report.reported_eps - previous.reported_eps) / abs(previous.reported_eps) * 100
+    return f"{_num(report.reported_eps)} contro {_num(previous.reported_eps)}   {_pct(change)}"
+
+
+def _recent_quarters(earnings: TickerEarnings, limit: int = 4) -> list[str]:
+    rows = []
+    for r in earnings.published[:limit]:
+        if r.reported_eps is None:
+            continue
+        against = f" su {_num(r.estimated_eps)}" if r.estimated_eps is not None else ""
+        gap = _surprise(r)
+        rows.append(f"  {_day(r.reported_date)}   {_num(r.reported_eps)}{against}   {gap or ''}")
+    return rows if len(rows) >= 2 else []
 
 
 def overdue_subject(decisions: list[Decision]) -> str:
@@ -105,19 +139,20 @@ def overdue_body(
     return "\n".join(lines) + "\n"
 
 
-def _track_record(earnings: TickerEarnings) -> str | None:
-    beats, total = earnings.track_record()
-    if total < 2:
-        return None
-    return f"ha superato le attese in {beats} degli ultimi {total} trimestri"
-
-
 def _surprise(report) -> str | None:
     """Prefer the source's own percentage; compute it when Yahoo leaves it empty."""
     percent = report.surprise_percentage
     if percent is None and report.reported_eps is not None and report.estimated_eps:
         percent = (report.reported_eps - report.estimated_eps) / abs(report.estimated_eps) * 100
     return None if percent is None else f"{percent:+.2f}%".replace(".", ",")
+
+
+def _pct(value: float | None) -> str:
+    return "" if value is None else f"{value:+.2f}%".replace(".", ",")
+
+
+def _price(value) -> str:
+    return "n.d." if value is None else f"{float(value):.2f}".replace(".", ",")
 
 
 def _num(value: float | None) -> str:

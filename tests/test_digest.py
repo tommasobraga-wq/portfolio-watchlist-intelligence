@@ -1,6 +1,7 @@
 """The logic that cannot be tested against the live source, tested against invented dates."""
 
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -10,6 +11,7 @@ from pwi.digest import (
     classify,
     is_in_window,
     is_source_stale,
+    reaction,
     to_report,
 )
 from pwi.models import EarningsReport, Label, TrackedTicker
@@ -218,3 +220,56 @@ def test_report_splits_announcements_from_faults() -> None:
 
     assert [d.symbol for d in published] == ["UCG.MI"]
     assert [d.symbol for d in overdue] == ["FBK.MI"]
+
+
+class TestPriceReaction:
+    """Publication-day move, computed over closes that have gaps by nature."""
+
+    CLOSES = {
+        date(2026, 7, 21): Decimal("82.62"),
+        date(2026, 7, 22): Decimal("83.21"),  # last close before publication
+        date(2026, 7, 23): Decimal("79.22"),  # publication day
+        date(2026, 7, 24): Decimal("80.43"),
+        date(2026, 8, 4): Decimal("85.17"),  # latest
+    }
+
+    def test_measures_from_the_close_before_publication(self) -> None:
+        r = reaction(self.CLOSES, date(2026, 7, 23))
+
+        assert r.before == Decimal("83.21")
+        assert r.on_day == Decimal("79.22")
+        assert round(r.day_move_pct, 2) == -4.8
+
+    def test_measures_the_drift_since(self) -> None:
+        r = reaction(self.CLOSES, date(2026, 7, 23))
+
+        assert r.latest == Decimal("85.17")
+        assert round(r.since_move_pct, 2) == 7.51
+
+    def test_a_weekend_publication_uses_the_next_session(self) -> None:
+        # Reporting after Friday's close: the reaction shows up on Monday, and the
+        # reference is still Friday. Missing days are absent, not zero.
+        r = reaction(self.CLOSES, date(2026, 7, 23))
+        weekend = reaction(
+            {date(2026, 7, 24): Decimal("80.43"), date(2026, 7, 22): Decimal("83.21")},
+            date(2026, 7, 23),
+        )
+
+        assert weekend.before == Decimal("83.21")
+        assert weekend.on_day == Decimal("80.43")
+        assert r.on_day != weekend.on_day
+
+    def test_no_prices_yields_nothing_rather_than_zero(self) -> None:
+        # A zero would read as "the stock did not move", which is a claim we cannot make.
+        r = reaction({}, date(2026, 7, 23))
+
+        assert r.day_move_pct is None and r.before is None
+
+    def test_no_close_before_publication_yields_no_move(self) -> None:
+        r = reaction({date(2026, 7, 23): Decimal("79.22")}, date(2026, 7, 23))
+
+        assert r.day_move_pct is None
+        assert r.on_day == Decimal("79.22")
+
+    def test_an_unknown_publication_date_yields_nothing(self) -> None:
+        assert reaction(self.CLOSES, None).day_move_pct is None
