@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 
 
@@ -25,7 +26,7 @@ class TrackedTicker:
 
 @dataclass(slots=True, frozen=True)
 class EarningsReport:
-    """One reported quarter as returned by Alpha Vantage `EARNINGS`."""
+    """One published quarter."""
 
     symbol: str
     fiscal_date_ending: date
@@ -36,5 +37,57 @@ class EarningsReport:
 
     @property
     def period(self) -> str:
+        """De-duplication key only — never displayed.
+
+        Derived from the announcement date, which sits a quarter after the fiscal period
+        it reports on, so the label reads "Q3" over Q2 figures. It is stable and unique
+        per quarter, which is all de-duplication needs. See the ADR.
+        """
         quarter = (self.fiscal_date_ending.month - 1) // 3 + 1
         return f"{self.fiscal_date_ending.year}-Q{quarter}"
+
+    @property
+    def beat(self) -> bool | None:
+        if self.reported_eps is None or self.estimated_eps is None:
+            return None
+        return self.reported_eps > self.estimated_eps
+
+
+@dataclass(slots=True, frozen=True)
+class Revenue:
+    """Revenue around the quarter just reported.
+
+    `actual` lags badly: Yahoo refreshes `earnings_dates` at publication but the income
+    statement much later — UCG.MI still had no June figure two weeks after reporting. So
+    `actual` is frequently None at notification time and `estimate` carries the message.
+    """
+
+    actual: Decimal | None = None
+    estimate: Decimal | None = None
+    currency: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class TickerEarnings:
+    """Everything one lookup yields about a symbol.
+
+    Returned whole so a job spends one request per ticker rather than one per question.
+    """
+
+    symbol: str
+    next_date: date | None = None
+    # Published quarters, newest first. Scheduled-but-unreported ones are excluded.
+    published: tuple[EarningsReport, ...] = ()
+
+    @property
+    def latest(self) -> EarningsReport | None:
+        return self.published[0] if self.published else None
+
+    def track_record(self, quarters: int = 4) -> tuple[int, int]:
+        """How often the company beat its estimate recently, as (beats, comparable)."""
+        comparable = [
+            r
+            for r in self.published[:quarters]
+            if r.reported_eps is not None and r.estimated_eps is not None
+        ]
+        return sum(1 for r in comparable if r.beat), len(comparable)

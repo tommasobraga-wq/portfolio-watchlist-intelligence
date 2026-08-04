@@ -1,99 +1,125 @@
-"""Turn decisions into the text of a notification. Pure — no SMTP, no clock.
+"""Notification text, in Italian. Pure — no SMTP, no clock.
 
-Deliberately never prints the fiscal-quarter label: it is derived from the announcement
-date, so it is off by a quarter and would read as wrong. The publication date is exact and
-says the same thing more usefully. See the ADR.
+One message per published result: the subject names the ticker, so it is recognisable in
+the inbox without opening it, and each result goes out as soon as it is detected. Overdue
+warnings are grouped instead — they are maintenance signals, not news, and one mail per
+ticker would be noise.
+
+Never prints the fiscal-quarter label: it is derived from the announcement date and sits a
+quarter off, so it would read "Q3" over Q2 figures. See the ADR.
 """
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from .digest import Decision
-from .models import Label, TrackedTicker
+from .models import Label, Revenue, TickerEarnings
 
 QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}"
+_LABEL_IT = {Label.HELD: "in portafoglio", Label.WATCHING: "osservato"}
 
 
-def subject(published: list[Decision], overdue: list[Decision]) -> str:
-    if published:
-        head = ", ".join(d.symbol for d in published[:3])
-        if len(published) > 3:
-            head += f" +{len(published) - 3}"
-        suffix = f" ({len(overdue)} overdue)" if overdue else ""
-        return f"Earnings: {head}{suffix}"
-    return f"Earnings: {len(overdue)} overdue, no results"
-
-
-def body(
-    published: list[Decision],
-    overdue: list[Decision],
-    labels: dict[str, Label],
-) -> str:
-    blocks: list[str] = []
-
-    if published:
-        blocks.append("RESULTS PUBLISHED")
-        blocks.extend(_published_block(d, labels) for d in published)
-
-    if overdue:
-        blocks.append(
-            "\nEXPECTED BUT NOT PUBLISHED\n"
-            "The reporting date has passed and no result was found. The source may be\n"
-            "missing the data rather than the company having delayed — worth a manual check."
-        )
-        blocks.extend(_overdue_block(d, labels) for d in overdue)
-
-    return "\n\n".join(blocks) + "\n"
-
-
-def _published_block(decision: Decision, labels: dict[str, Label]) -> str:
+def result_subject(decision: Decision, label: Label) -> str:
     report = decision.report
-    assert report is not None  # NOTIFY always carries one
-    lines = [f"{decision.symbol} [{_label(decision.symbol, labels)}]"]
+    assert report is not None
+    verdict = {True: "sopra le attese", False: "sotto le attese", None: "risultati"}[report.beat]
+    surprise = _surprise(report)
+    tail = f" ({surprise})" if surprise else ""
+    return f"{decision.symbol} — {verdict}{tail}"
 
-    if report.reported_date:
-        lines.append(f"  published    {report.reported_date:%d %b %Y}")
-    lines.append(f"  EPS actual   {_num(report.reported_eps)}")
-    lines.append(f"  EPS estimate {_num(report.estimated_eps)}")
 
-    surprise = _surprise(report.reported_eps, report.estimated_eps, report.surprise_percentage)
-    if surprise:
-        lines.append(f"  surprise     {surprise}")
+def result_body(
+    decision: Decision,
+    label: Label,
+    earnings: TickerEarnings | None = None,
+    revenue: Revenue | None = None,
+) -> str:
+    report = decision.report
+    assert report is not None
+    lines = [
+        f"{decision.symbol} — {_LABEL_IT[label]}",
+        "",
+        f"Risultati pubblicati il {_day(report.reported_date)}.",
+        "",
+        "UTILE PER AZIONE",
+        f"  consuntivo   {_num(report.reported_eps)}",
+        f"  atteso       {_num(report.estimated_eps)}",
+    ]
+    if surprise := _surprise(report):
+        lines.append(f"  scarto       {surprise}")
 
-    lines.append(f"  source       {QUOTE_URL.format(symbol=decision.symbol)}")
+    if revenue and (revenue.actual is not None or revenue.estimate is not None):
+        lines += ["", "RICAVI"]
+        if revenue.actual is not None:
+            lines.append(f"  consuntivo   {_money(revenue.actual)}")
+        else:
+            # Worth saying out loud: silence here is a source lag, not a missing result.
+            lines.append("  consuntivo   non ancora disponibile presso la fonte")
+        if revenue.estimate is not None:
+            lines.append(f"  atteso       {_money(revenue.estimate)}")
+
+    if earnings and (record := _track_record(earnings)):
+        lines += ["", "STORICO", f"  {record}"]
+
+    lines += ["", f"Fonte: {QUOTE_URL.format(symbol=decision.symbol)}"]
+    return "\n".join(lines) + "\n"
+
+
+def overdue_subject(decisions: list[Decision]) -> str:
+    if len(decisions) == 1:
+        return f"Risultati attesi e non trovati: {decisions[0].symbol}"
+    return f"Risultati attesi e non trovati: {len(decisions)} titoli"
+
+
+def overdue_body(decisions: list[Decision], labels: dict[str, Label]) -> str:
+    lines = [
+        "La data prevista è passata e non risulta alcun risultato pubblicato.",
+        "",
+        "Può voler dire che la società ha rinviato, oppure che la fonte non ha",
+        "ancora i dati: vale una verifica manuale.",
+        "",
+    ]
+    for d in decisions:
+        label = labels.get(d.symbol, Label.WATCHING)
+        lines += [
+            f"{d.symbol} — {_LABEL_IT[label]}",
+            f"  attesi il    {_day(d.expected_on)} ({d.days_overdue} giorni fa)",
+            f"  fonte        {QUOTE_URL.format(symbol=d.symbol)}",
+            "",
+        ]
     return "\n".join(lines)
 
 
-def _overdue_block(decision: Decision, labels: dict[str, Label]) -> str:
-    return (
-        f"{decision.symbol} [{_label(decision.symbol, labels)}]\n"
-        f"  expected     {decision.expected_on:%d %b %Y}"
-        f" ({decision.days_overdue} days ago)\n"
-        f"  source       {QUOTE_URL.format(symbol=decision.symbol)}"
-    )
+def _track_record(earnings: TickerEarnings) -> str | None:
+    beats, total = earnings.track_record()
+    if total < 2:
+        return None
+    return f"ha superato le attese in {beats} degli ultimi {total} trimestri"
 
 
-def _label(symbol: str, labels: dict[str, Label]) -> str:
-    # The held/watching distinction is the one thing the ADR insists the notification show.
-    return labels.get(symbol, Label.WATCHING).upper()
+def _surprise(report) -> str | None:
+    """Prefer the source's own percentage; compute it when Yahoo leaves it empty."""
+    percent = report.surprise_percentage
+    if percent is None and report.reported_eps is not None and report.estimated_eps:
+        percent = (report.reported_eps - report.estimated_eps) / abs(report.estimated_eps) * 100
+    return None if percent is None else f"{percent:+.2f}%".replace(".", ",")
 
 
 def _num(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}"
+    return "n.d." if value is None else f"{value:.2f}".replace(".", ",")
 
 
-def _surprise(actual: float | None, estimate: float | None, given: float | None) -> str | None:
-    """Prefer the source's own percentage; fall back to computing it.
-
-    Yahoo leaves Surprise(%) empty on some rows even when both EPS values are present,
-    and a beat is exactly what the reader wants to see at a glance.
-    """
-    percent = given
-    if percent is None and actual is not None and estimate not in (None, 0):
-        percent = (actual - estimate) / abs(estimate) * 100
-    if percent is None:
-        return None
-    return f"{percent:+.2f}%"
+def _money(value: Decimal) -> str:
+    millions = value / Decimal(1_000_000)
+    if millions >= 1000:
+        return f"{millions / 1000:,.2f} mld".replace(",", "·").replace(".", ",").replace("·", ".")
+    return f"{millions:,.0f} mln".replace(",", ".")
 
 
-def labels_of(watchlist: list[TrackedTicker]) -> dict[str, Label]:
+def _day(value) -> str:
+    return "data ignota" if value is None else f"{value:%d/%m/%Y}"
+
+
+def labels_of(watchlist) -> dict[str, Label]:
     return {t.symbol: t.label for t in watchlist}

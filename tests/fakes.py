@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from pwi.models import EarningsReport
+from pwi.models import Revenue, TickerEarnings
 from pwi.sources import SourceUnavailable
 
 
@@ -23,25 +23,27 @@ class FakeEarningsSource:
 
     def __init__(
         self,
-        next_dates: dict[str, date] | None = None,
-        reports: dict[str, EarningsReport] | None = None,
+        earnings: dict[str, TickerEarnings] | None = None,
+        revenues: dict[str, Revenue] | None = None,
         unavailable: set[str] | None = None,
     ) -> None:
-        self._next_dates = next_dates or {}
-        self._reports = reports or {}
+        self._earnings = earnings or {}
+        self._revenues = revenues or {}
         self._unavailable = unavailable or set()
-        self.calls: list[str] = []  # lets tests assert that quota was not wasted
+        self.fetched: list[str] = []  # lets tests assert no lookup is wasted
+        self.revenue_calls: list[str] = []
 
-    def next_earnings_date(self, symbol: str) -> date | None:
-        self._record(symbol)
-        return self._next_dates.get(symbol)
+    def fetch(self, symbol: str) -> TickerEarnings:
+        self.fetched.append(symbol)
+        self._guard(symbol)
+        return self._earnings.get(symbol, TickerEarnings(symbol))
 
-    def latest_report(self, symbol: str) -> EarningsReport | None:
-        self._record(symbol)
-        return self._reports.get(symbol)
+    def revenue(self, symbol: str) -> Revenue:
+        self.revenue_calls.append(symbol)
+        self._guard(symbol)
+        return self._revenues.get(symbol, Revenue())
 
-    def _record(self, symbol: str) -> None:
-        self.calls.append(symbol)
+    def _guard(self, symbol: str) -> None:
         if symbol in self._unavailable:
             raise SourceUnavailable(f"fake source is throttled for {symbol}")
 

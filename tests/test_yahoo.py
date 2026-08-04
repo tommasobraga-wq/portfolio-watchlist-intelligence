@@ -1,6 +1,7 @@
 """Adapter tests: real pandas frames shaped like yfinance's, no network."""
 
 from datetime import date
+from decimal import Decimal
 
 import pandas as pd
 import pytest
@@ -22,8 +23,18 @@ FRAME = pd.DataFrame(
     ),
 )
 
+INCOME = pd.DataFrame(
+    {
+        pd.Timestamp("2026-06-30"): [float("nan")],  # lags publication by weeks
+        pd.Timestamp("2026-03-31"): [7073.0],
+    },
+    index=["Total Revenue"],
+)
 
-def _source(frame=FRAME, error: Exception | None = None) -> YahooEarnings:
+CALENDAR = {"Earnings Date": [date(2026, 10, 22)], "Revenue Average": 6480867890}
+
+
+def _source(frame=FRAME, income=INCOME, calendar=CALENDAR, error: Exception | None = None):
     class FakeTicker:
         def __init__(self, symbol: str) -> None:
             self.symbol = symbol
@@ -34,6 +45,14 @@ def _source(frame=FRAME, error: Exception | None = None) -> YahooEarnings:
                 raise error
             return frame
 
+        @property
+        def quarterly_income_stmt(self):
+            return income
+
+        @property
+        def calendar(self):
+            return calendar
+
     return YahooEarnings(ticker_factory=FakeTicker)
 
 
@@ -41,42 +60,69 @@ def test_satisfies_the_protocol() -> None:
     assert isinstance(_source(), EarningsSource)
 
 
-def test_next_date_is_the_earliest_unreported_quarter() -> None:
-    assert _source().next_earnings_date("UCG.MI") == date(2026, 10, 22)
+def test_fetch_separates_scheduled_from_published() -> None:
+    earnings = _source().fetch("UCG.MI")
+
+    # The 2026-10-22 row has no reported EPS: scheduled, so it is the next date and must
+    # not appear among published quarters.
+    assert earnings.next_date == date(2026, 10, 22)
+    assert [r.reported_date for r in earnings.published] == [date(2026, 7, 23), date(2026, 5, 5)]
 
 
-def test_latest_report_is_the_most_recent_published_quarter() -> None:
-    report = _source().latest_report("UCG.MI")
+def test_latest_is_the_most_recent_published_quarter() -> None:
+    latest = _source().fetch("UCG.MI").latest
 
-    # 2026-10-22 is scheduled but unreported, so it must not win.
-    assert report.reported_date == date(2026, 7, 23)
-    assert report.reported_eps == 1.80
-    assert report.estimated_eps == 1.79
-    assert report.surprise_percentage == 0.55
+    assert latest.reported_date == date(2026, 7, 23)
+    assert latest.reported_eps == 1.80
+    assert latest.estimated_eps == 1.79
+    assert latest.surprise_percentage == 0.55
+    assert latest.beat is True
 
 
-def test_scheduled_quarter_is_never_reported_as_published() -> None:
-    # Only the future row: nothing has been published yet, so there is no report at all.
-    frame = FRAME.head(1)
+def test_nothing_published_yet_yields_no_latest() -> None:
+    earnings = _source(FRAME.head(1)).fetch("UCG.MI")
 
-    assert _source(frame).latest_report("UCG.MI") is None
-    assert _source(frame).next_earnings_date("UCG.MI") == date(2026, 10, 22)
+    assert earnings.latest is None
+    assert earnings.next_date == date(2026, 10, 22)
 
 
 def test_all_reported_means_no_next_date() -> None:
-    frame = FRAME.tail(2)
-
-    assert _source(frame).next_earnings_date("UCG.MI") is None
+    assert _source(FRAME.tail(2)).fetch("UCG.MI").next_date is None
 
 
-def test_unknown_symbol_is_no_data_not_an_error() -> None:
+def test_unknown_symbol_is_empty_not_an_error() -> None:
     empty = pd.DataFrame(columns=[COL_ESTIMATE, COL_REPORTED, COL_SURPRISE])
 
-    assert _source(empty).latest_report("NOPE") is None
-    assert _source(empty).next_earnings_date("NOPE") is None
+    earnings = _source(empty).fetch("NOPE")
+
+    assert earnings.published == ()
+    assert earnings.next_date is None
 
 
 def test_lookup_failure_is_source_unavailable() -> None:
     # yfinance raises a wide, unstable set of exceptions; all become one retryable type.
     with pytest.raises(SourceUnavailable):
-        _source(error=RuntimeError("rate limited")).latest_report("UCG.MI")
+        _source(error=RuntimeError("rate limited")).fetch("UCG.MI")
+
+
+class TestRevenue:
+    def test_lagging_actual_is_reported_as_unknown(self) -> None:
+        # The newest column is NaN because the income statement trails publication. That
+        # must read as "not known yet", never as zero.
+        revenue = _source().revenue("UCG.MI")
+
+        assert revenue.actual is None
+        assert revenue.estimate == Decimal("6480867890")
+
+    def test_actual_is_read_once_the_source_fills_it_in(self) -> None:
+        filled = pd.DataFrame(
+            {pd.Timestamp("2026-06-30"): [6500.0]},
+            index=["Total Revenue"],
+        )
+
+        assert _source(income=filled).revenue("UCG.MI").actual == Decimal("6500.0")
+
+    def test_missing_statement_is_not_a_failure(self) -> None:
+        revenue = _source(income=pd.DataFrame(), calendar={}).revenue("UCG.MI")
+
+        assert revenue.actual is None and revenue.estimate is None

@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
-from .models import EarningsReport
+from .models import Revenue, TickerEarnings
 
 
 class SourceError(RuntimeError):
@@ -31,19 +31,23 @@ class SourceUnavailable(SourceError):
 
 @runtime_checkable
 class EarningsSource(Protocol):
-    def next_earnings_date(self, symbol: str) -> date | None:
-        """The next expected reporting date, or None if the source has no scheduled date.
+    def fetch(self, symbol: str) -> TickerEarnings:
+        """Next expected date and published history, in one request.
 
-        Expected dates shift; callers re-read them rather than caching indefinitely.
+        Deliberately one call rather than one per question: a job needs both values
+        together, and asking twice doubles the load on a source that rate-limits.
+
+        `published` must never include a quarter that is scheduled but not yet released.
+        That distinction is the entire basis of the publication check, so it belongs to the
+        implementation, which knows how its vendor signals "not out yet".
         """
         ...
 
-    def latest_report(self, symbol: str) -> EarningsReport | None:
-        """The most recently *published* quarter, or None if nothing has been reported.
+    def revenue(self, symbol: str) -> Revenue:
+        """Revenue for the most recent quarter. Both fields may be None.
 
-        Must never return a quarter that has been scheduled but not yet released — that
-        distinction is the entire basis of the publication check, so it belongs to the
-        implementation, which knows how its vendor signals "not out yet".
+        Separate from `fetch` because it costs extra requests and is only wanted for the
+        handful of tickers actually being notified — never for the window check.
         """
         ...
 
