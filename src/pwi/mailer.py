@@ -16,6 +16,13 @@ from email.message import EmailMessage
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465  # implicit TLS
 
+APP_PASSWORD_LENGTH = 16  # Google issues 16 characters, displayed in groups of four
+
+
+def _clean(value: str | None) -> str:
+    """Strip whitespace and one layer of surrounding quotes."""
+    return (value or "").strip().strip("\"'").strip()
+
 
 class MailNotConfigured(RuntimeError):
     """Raised at startup rather than at send time, so a misconfigured job fails loudly."""
@@ -29,13 +36,19 @@ class Mailer:
 
     @classmethod
     def from_env(cls) -> Mailer:
-        address = os.environ.get("GMAIL_ADDRESS", "").strip()
-        password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
+        address = _clean(os.environ.get("GMAIL_ADDRESS"))
+        # Google displays app passwords in groups of four, and .env files are often written
+        # with the value quoted because of those spaces. Both survive round-trips through
+        # shells and CI in ways that leave stray characters in the value, so strip them.
+        password = _clean(os.environ.get("GMAIL_APP_PASSWORD")).replace(" ", "")
         if not address or not password:
             raise MailNotConfigured("GMAIL_ADDRESS and GMAIL_APP_PASSWORD must both be set")
-        # Google displays app passwords in groups of four; pasted spaces are a common trip.
-        recipient = os.environ.get("NOTIFY_TO", "").strip() or address
-        return cls(address, password, recipient)
+        if len(password) != APP_PASSWORD_LENGTH:
+            raise MailNotConfigured(
+                f"GMAIL_APP_PASSWORD should be {APP_PASSWORD_LENGTH} characters once spaces "
+                f"are removed, got {len(password)} — check for stray quotes or characters"
+            )
+        return cls(address, password, _clean(os.environ.get("NOTIFY_TO")) or address)
 
     def send(self, subject: str, body: str) -> None:
         message = EmailMessage()
