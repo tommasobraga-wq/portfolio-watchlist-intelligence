@@ -60,33 +60,58 @@ Swapping one for a more convenient equivalent defeats the point of the project:
 | Concern | Source | Style being exercised |
 |---|---|---|
 | Fundamentals / company data | S&P Global (Kensho) MCP (already connected) | MCP **client** |
-| Earnings calendar + actual vs. estimate | Alpha Vantage `EARNINGS` REST endpoint, **called directly** | Raw **REST** — auth, rate limiting, parsing |
+| Upcoming earnings dates | Alpha Vantage `EARNINGS_CALENDAR`, **called directly** — returns **CSV** | Raw **REST** — auth, rate limiting, parsing |
+| Reported results (actual vs. estimate) | Alpha Vantage `EARNINGS`, **called directly** — returns JSON | Raw **REST** |
 | Aggregation / digest / cross-ticker state logic | Custom minimal MCP server (Phase 3) | MCP **server** |
+
+`EARNINGS` returns *only already-reported* quarters — it has no future date, so Calendar Sync cannot
+be built on it. That job needs `EARNINGS_CALENDAR`, a different endpoint in a different format.
+Two endpoints, two parsers.
 
 Alpha Vantage also ships an official MCP server for the same data — using it was explicitly
 rejected, since it would repeat the MCP-client skill already covered by Kensho and leave raw REST
 integration unexercised. The overlap to avoid is in *style*, not in *data*.
 
 Constraints to code against:
-- Alpha Vantage free tier: **25 requests/day**. Batch deliberately and handle rate limits explicitly.
+- Alpha Vantage free tier: **25 requests/day**. Budget: Calendar Sync calls `EARNINGS_CALENDAR`
+  *without* `symbol` and with `horizon=3month`, getting every company in **one** CSV and filtering
+  locally — 1 request/week, not one per ticker. Results Watch queries only tickers inside the active
+  window, typically 0–3/day.
+- Quota exhaustion arrives as **HTTP 200** with a `Note`/`Information` key, not an error status —
+  already handled in `alphavantage.py`; keep it that way for any new endpoint.
+- The daily quota is **not** tracked across runs yet; the client only reacts once the API refuses.
 - **Unvalidated assumption:** Alpha Vantage earnings coverage for Milan-listed tickers
   (`UCG.MI`, `FBK.MI`, `RACE.MI`, `PRY.MI`). Verify with 2–3 `.MI` tickers before building the
   architecture on top of this source.
 
 ## Deployment target
 
-Scheduled serverless compute — Lambda + EventBridge (or Fargate if containerized) running the two
-jobs on their own cadences. Notification delivery goes through the already-connected **Gmail MCP**;
-there is no frontend and none is planned.
+**GitHub Actions** (`schedule:` cron), headless — Calendar Sync weekly, Results Watch daily ~06:00
+UTC. There is no frontend and none is planned.
+
+Three constraints here are decisions, not conveniences (ADR *Deployment* / *Delivery*):
+
+- **MCP connectors are unreachable from scheduled jobs.** Kensho and Gmail are authenticated to a
+  personal Claude account and invoked by a model in a client session — not an HTTP API code can
+  call. Anything scheduled is plain Python with plain credentials.
+- **Delivery is SMTP with a Gmail app password**, not the Gmail MCP: that connector only exposes
+  `create_draft`/`update_draft` and cannot send. Don't reintroduce it as a delivery path.
+- **State (`last_notified_period`) is committed back to the repo** by the job, since a cloud runner
+  cannot see a local `data/watchlist.json`.
+
+The custom MCP server (Phase 3) is deliberately *outside* the scheduled path. Aggregation lives in
+`pwi.digest` with two entry points over it: a CLI for cron, an MCP server for interactive use from
+Claude Code. Lambda + EventBridge is deferred to an optional Phase 5, not rejected.
 
 ## Implementation phases
 
 Each phase is independently shippable; stopping after any one still leaves a usable increment.
 
 1. Local script: read watchlist state via Kensho MCP; validate Alpha Vantage `.MI` coverage.
-2. Alpha Vantage REST integration (calendar dates + actual results) with rate-limit handling.
-3. Minimal custom MCP server wrapping aggregation/state logic.
-4. Deploy both scheduled jobs with digest delivery via Gmail MCP.
+2. Alpha Vantage REST: `EARNINGS` (JSON) + `EARNINGS_CALENDAR` (CSV), with rate-limit handling.
+3. `pwi.digest` aggregation/state module, wrapped by a minimal custom MCP server.
+4. Both jobs on GitHub Actions, digest over SMTP, state committed back to the repo.
+5. *(optional, later)* Lift the same entry points onto Lambda + EventBridge.
 
 ## Conventions
 
