@@ -1,0 +1,61 @@
+name: Results Watch
+
+# Detects published results and mails them. Runs every three hours: the binding constraint
+# on latency is not this schedule but how long Yahoo takes to populate an actual EPS after
+# a company reports, so polling faster buys nothing. Outside earnings season almost every
+# run does no work at all, because only tickers inside their reporting window are queried.
+#
+# GitHub's scheduled runs are best-effort — they drift by minutes and are occasionally
+# skipped under load. At this cadence a missed run is invisible.
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be sent, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Both jobs write the same encrypted watchlist. Queue rather than cancel: a cancelled run
+# could drop a notification that was already sent but not yet recorded.
+concurrency:
+  group: watchlist-state
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run
+        env:
+          PWI_WATCHLIST_KEY: ${{ secrets.PWI_WATCHLIST_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: |
+          uv run python -m pwi results-watch \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit state
+        run: |
+          if git diff --quiet -- data/watchlist.enc; then
+            echo "no state change"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/watchlist.enc
+          git commit -m "Results watch: record notified quarters [skip ci]"
+          # Another run may have pushed while this one worked; rebase rather than fail.
+          git pull --rebase --autostash origin ${{ github.ref_name }}
+          git push

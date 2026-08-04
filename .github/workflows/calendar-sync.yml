@@ -1,0 +1,52 @@
+name: Calendar Sync
+
+# Refreshes every ticker's expected reporting date. Weekly is enough: dates move, but by
+# days rather than hours. This is also what re-arms a ticker after Results Watch cleared
+# its date on notifying, so it must keep running even when nothing is reporting.
+on:
+  schedule:
+    - cron: "0 3 * * 0" # Sunday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would change, write nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Shared with Results Watch: both write the same encrypted watchlist.
+concurrency:
+  group: watchlist-state
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run
+        env:
+          PWI_WATCHLIST_KEY: ${{ secrets.PWI_WATCHLIST_KEY }}
+        run: |
+          uv run python -m pwi calendar-sync \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit state
+        run: |
+          if git diff --quiet -- data/watchlist.enc; then
+            echo "no date changed"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/watchlist.enc
+          git commit -m "Calendar sync: refresh expected reporting dates [skip ci]"
+          git pull --rebase --autostash origin ${{ github.ref_name }}
+          git push
