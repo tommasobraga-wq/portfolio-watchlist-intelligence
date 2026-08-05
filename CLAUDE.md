@@ -117,6 +117,16 @@ cheapest documented API covering Milan, earnings and prices is $99/month, out of
 does not list Milan at all. A working unattended notifier outranks the learning goal; the MCP
 client and server skills are unaffected.
 
+**Borsa Italiana's own dividend calendar was checked on 2026-08-05 as a candidate for a forward
+`next_dividend_date` and not adopted, for now.** Manually driven via browser (`calendario-eventi-dividendi.html`
+is a JS search form, no clean API endpoint found) it does return genuine forward ex-dividend dates
+for some Milan names — Eni's 21/09/2026 matched Yahoo's own forward date exactly, a useful
+cross-check — but a same-window search for UCG.MI and FBK.MI, the tickers this watchlist actually
+holds, returned nothing: their boards have not yet set the next date anywhere, Yahoo included. The
+gap is the event, not either source. Revisit only if a held ticker is one Borsa Italiana already
+covers forward; until then it would add a scraper for a benefit nothing in the current watchlist
+would see.
+
 Constraints to code against:
 - **Sources go behind `EarningsSource` / `PriceSource` / `DividendSource` protocols.** No vendor concept — API keys,
   crumbs, `NaN`, DataFrames — crosses that boundary; `digest.py`, `jobs.py` and the MCP server depend
