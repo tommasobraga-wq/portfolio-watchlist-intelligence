@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from .models import EarningsReport, Revenue, TickerEarnings
+from .models import Dividend, EarningsReport, Revenue, TickerEarnings
 from .sources import SourceUnavailable
 
 # yfinance column names, kept in one place since they are the thing most likely to change.
@@ -100,6 +100,41 @@ class YahooEarnings:
             return get(self._ticker(symbol))
         except Exception as exc:  # yfinance raises a wide and unstable set of errors
             raise SourceUnavailable(f"Yahoo lookup failed for {symbol}: {exc}") from exc
+
+
+class YahooDividends:
+    """Satisfies `DividendSource`.
+
+    `t.dividends` is indexed by ex-dividend date and holds only payments that have already
+    gone ex — Yahoo never exposes a forward payment date for every exchange this watchlist
+    covers, Milan included, so there is nothing to schedule against, only history to watch.
+    """
+
+    def __init__(self, ticker_factory: Any = None) -> None:
+        if ticker_factory is None:
+            import yfinance
+
+            ticker_factory = yfinance.Ticker
+        self._ticker = ticker_factory
+
+    def history(self, symbol: str) -> tuple[Dividend, ...]:
+        series = self._call(symbol, lambda t: t.dividends)
+        if series is None or series.empty:
+            return ()
+
+        out: list[Dividend] = []
+        for index, value in series.items():
+            amount = _as_decimal(value)
+            if amount is None:
+                continue
+            out.append(Dividend(symbol=symbol, ex_date=_as_date(index), amount=amount))
+        return tuple(out)
+
+    def _call(self, symbol: str, get: Any) -> Any:
+        try:
+            return get(self._ticker(symbol))
+        except Exception as exc:
+            raise SourceUnavailable(f"Yahoo dividends failed for {symbol}: {exc}") from exc
 
 
 class YahooPrices:

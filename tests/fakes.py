@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from pwi.models import Revenue, TickerEarnings
+from pwi.models import Dividend, Revenue, TickerEarnings
 from pwi.sources import SourceUnavailable
 
 
@@ -46,6 +46,25 @@ class FakeEarningsSource:
     def _guard(self, symbol: str) -> None:
         if symbol in self._unavailable:
             raise SourceUnavailable(f"fake source is throttled for {symbol}")
+
+
+class FakeDividendSource:
+    """Satisfies `DividendSource`."""
+
+    def __init__(
+        self,
+        history: dict[str, tuple[Dividend, ...]] | None = None,
+        unavailable: set[str] | None = None,
+    ) -> None:
+        self._history = history or {}
+        self._unavailable = unavailable or set()
+        self.fetched: list[str] = []
+
+    def history(self, symbol: str) -> tuple[Dividend, ...]:
+        self.fetched.append(symbol)
+        if symbol in self._unavailable:
+            raise SourceUnavailable(f"fake source is throttled for {symbol}")
+        return self._history.get(symbol, ())
 
 
 class FakePriceSource:

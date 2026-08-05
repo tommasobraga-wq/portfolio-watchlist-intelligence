@@ -1,9 +1,11 @@
 from datetime import date
 from decimal import Decimal
 
-from pwi.digest import Decision, Outcome, PriceReaction
-from pwi.models import EarningsReport, Label, Revenue, TickerEarnings
+from pwi.digest import Decision, DividendDecision, DividendOutcome, Outcome, PriceReaction
+from pwi.models import Dividend, EarningsReport, Label, Revenue, TickerEarnings
 from pwi.render import (
+    dividend_body,
+    dividend_subject,
     overdue_body,
     overdue_subject,
     result_body,
@@ -141,6 +143,42 @@ class TestBody:
 
         assert "n.d." in text
         assert "data ignota" in text
+
+
+class TestDividend:
+    DECISION = DividendDecision(
+        "UCG.MI",
+        DividendOutcome.NOTIFY,
+        dividend=Dividend("UCG.MI", date(2026, 4, 20), Decimal("1.7208")),
+    )
+
+    def test_subject_names_the_ticker_and_amount(self) -> None:
+        assert dividend_subject(self.DECISION, Label.HELD) == "UCG.MI — dividendo 1,7208"
+
+    def test_body_states_the_ex_date_and_amount(self) -> None:
+        text = dividend_body(self.DECISION, Label.HELD)
+
+        assert "UCG.MI — in portafoglio" in text
+        assert "20/04/2026" in text
+        assert "1,7208" in text
+
+    def test_body_never_claims_a_specific_payment_timing(self) -> None:
+        # Measured on real data: the ex-date-to-payment gap ranges from 3 to 39 days across
+        # a sample of US payers, and Yahoo never publishes a forward payment date at all for
+        # the Milan tickers this watchlist actually holds. Any specific figure here would be
+        # a guess dressed as fact.
+        text = dividend_body(self.DECISION, Label.HELD)
+
+        assert "settiman" not in text and "giorni" not in text
+
+    def test_a_whole_amount_drops_trailing_zeros(self) -> None:
+        whole = DividendDecision(
+            "AAA.MI",
+            DividendOutcome.NOTIFY,
+            dividend=Dividend("AAA.MI", date(2026, 4, 20), Decimal("2.00")),
+        )
+
+        assert dividend_subject(whole, Label.HELD) == "AAA.MI — dividendo 2"
 
 
 class TestOverdue:

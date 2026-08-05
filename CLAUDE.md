@@ -15,7 +15,7 @@ Layering, and it matters — the interesting logic is deliberately kept away fro
 | `render.py` | **all** wording (Italian). Pure |
 | `yahoo.py` | **all** vendor detail: DataFrames, `NaN`, tz-aware stamps. Nothing leaks past it |
 | `jobs.py` | orchestration and persistence only |
-| `sources.py` | the `EarningsSource` / `PriceSource` contracts both sides depend on |
+| `sources.py` | the `EarningsSource` / `PriceSource` / `DividendSource` contracts both sides depend on |
 
 Earnings happen four times a year, so the decision logic can only be exercised against fakes with
 invented dates. Keep it pure — putting a network call or `date.today()` into `digest.py` makes the
@@ -43,6 +43,7 @@ uv run ruff check . && uv run ruff format .
 uv run python -m pwi calendar-sync             # refresh expected dates
 uv run python -m pwi results-watch             # detect and mail results
 uv run python -m pwi results-watch --dry-run   # prints mails, writes nothing
+uv run python -m pwi dividend-watch            # detect and mail held-ticker distributions
 
 uv run scripts/watchlist_tool.py show          # add / remove / edit / generate-key
 uv run scripts/smoke_test.py                   # real source + real SMTP, sends real mail
@@ -70,7 +71,7 @@ PSP license — rejected as disproportionate). Don't add these back without an A
 
 ## Architecture
 
-Two **separate** scheduled jobs over one shared data store — they have different cadences and
+Three **separate** scheduled jobs over one shared data store — they have different cadences and
 triggers, and the ADR treats keeping them separate as a decision, not an accident:
 
 1. **Calendar Sync** (~weekly) — refresh `next_earnings_date` for every tracked ticker; expected
@@ -78,9 +79,14 @@ triggers, and the ADR treats keeping them separate as a decision, not an acciden
 2. **Results Watch** (~daily, active only in the window around each ticker's expected date) — detect
    published results, send a digest (EPS actual vs. estimate, revenue, surprise %, source link),
    then stamp `last_notified_period` to suppress duplicate alerts for that quarter.
+3. **Dividend Watch** (daily, `held` tickers only) — detect a new entry in a ticker's dividend
+   history and mail it, then stamp `last_notified_dividend_date`. No window: unlike earnings, no
+   vendor here publishes a forward payment date for every exchange this watchlist covers (Milan
+   included), so there is nothing to schedule against, only a historical series to watch. `watching`
+   tickers are skipped — they pay nothing to the reader, so a distribution on one is not actionable.
 
 Tracked-ticker record, minimum fields: `symbol`, `label` (`held` | `watching`, static and manually
-maintained), `next_earnings_date`, `last_notified_period`.
+maintained), `next_earnings_date`, `last_notified_period`, `last_notified_dividend_date`.
 
 ## Data sources — do not substitute them
 
@@ -112,7 +118,7 @@ does not list Milan at all. A working unattended notifier outranks the learning 
 client and server skills are unaffected.
 
 Constraints to code against:
-- **Sources go behind `EarningsSource` / `PriceSource` protocols.** No vendor concept — API keys,
+- **Sources go behind `EarningsSource` / `PriceSource` / `DividendSource` protocols.** No vendor concept — API keys,
   crumbs, `NaN`, DataFrames — crosses that boundary; `digest.py`, `jobs.py` and the MCP server depend
   on the protocol only. Derive the protocols from what the jobs actually need (two or three methods),
   not from every eventuality. This is why a vendor swap stays a one-class change.
@@ -126,11 +132,18 @@ Constraints to code against:
 ## Deployment target
 
 **GitHub Actions** (`schedule:` cron), headless — Calendar Sync weekly (Sun 03:00 UTC), Results
-Watch every 3 hours. There is no frontend and none is planned.
+Watch every 3 hours, Dividend Watch daily (06:00 UTC). There is no frontend and none is planned.
 
 Three hours rather than faster because the limit on latency is how long Yahoo takes to populate an
 actual EPS after a company reports, not the polling rate. Actions cron is best-effort and drifts;
 at this cadence a missed run is invisible.
+
+Dividend Watch runs daily rather than every three hours: the held tickers on this watchlist pay
+1-4 times a year (measured), so a daily check costs nothing. A faster cadence would not buy more
+timeliness either — Yahoo's own historical series was measured to lag the real ex-dividend date by
+2-5 days regardless of polling frequency, and that lag is the bottleneck, not this schedule. Do not
+assume a forward payment date exists to schedule against: Yahoo never publishes one for the Milan
+tickers this watchlist actually holds (UCG.MI, FBK.MI, RACE.MI), only for some US names.
 
 Three constraints here are decisions, not conveniences (ADR *Deployment* / *Delivery*):
 
@@ -139,8 +152,8 @@ Three constraints here are decisions, not conveniences (ADR *Deployment* / *Deli
   call. Anything scheduled is plain Python with plain credentials.
 - **Delivery is SMTP with a Gmail app password**, not the Gmail MCP: that connector only exposes
   `create_draft`/`update_draft` and cannot send. Don't reintroduce it as a delivery path.
-- **State (`last_notified_period`) is committed back to the repo** by the job, since a cloud runner
-  cannot see a local `data/watchlist.json`.
+- **State (`last_notified_period`, `last_notified_dividend_date`) is committed back to the repo** by
+  the job, since a cloud runner cannot see a local `data/watchlist.json`.
 
 The custom MCP server (Phase 3) is deliberately *outside* the scheduled path. Aggregation lives in
 `pwi.digest` with two entry points over it: a CLI for cron, an MCP server for interactive use from

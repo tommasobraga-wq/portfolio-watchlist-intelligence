@@ -1,0 +1,68 @@
+name: Dividend Watch
+
+# Detects a newly distributed dividend on a held ticker and mails it. Held only: a
+# watched-only ticker pays nothing to the reader.
+#
+# Daily rather than every three hours like Results Watch: these tickers pay 1-4 times a
+# year (measured on the actual watchlist), so a daily check costs nothing. Nor would a
+# faster cadence buy any timeliness — Yahoo's own historical series was measured to lag the
+# real ex-dividend date by 2-5 days regardless of how often it is polled, and that lag is
+# the bottleneck, not this schedule.
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be sent, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Shared with Calendar Sync and Results Watch: all three write the same encrypted watchlist.
+concurrency:
+  group: watchlist-state
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # See the same step in results-watch.yml: a queued run is pinned to a commit that may
+      # already be stale by the time the concurrency group lets it start.
+      - name: Take the current state
+        run: |
+          git fetch origin ${{ github.ref_name }}
+          git reset --hard origin/${{ github.ref_name }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run
+        env:
+          PWI_WATCHLIST_KEY: ${{ secrets.PWI_WATCHLIST_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: |
+          uv run python -m pwi dividend-watch \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit state
+        run: |
+          if git diff --quiet -- data/watchlist.enc; then
+            echo "no state change"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/watchlist.enc
+          git commit -m "Dividend watch: record notified distributions [skip ci]"
+          # The encrypted watchlist cannot be merged; see results-watch.yml. A rejected push
+          # means the branch moved, and the next daily run redoes the work.
+          git push

@@ -24,8 +24,8 @@ from pathlib import Path
 
 from . import digest, render, watchlist
 from .mailer import Mailer
-from .models import TrackedTicker
-from .sources import EarningsSource, PriceSource, SourceUnavailable
+from .models import Label, TrackedTicker
+from .sources import DividendSource, EarningsSource, PriceSource, SourceUnavailable
 
 log = logging.getLogger("pwi")
 
@@ -208,6 +208,95 @@ def _announce(
 
 def _apply(tickers: list[TrackedTicker], ticker: TrackedTicker, decision: digest.Decision) -> None:
     updated = digest.apply(ticker, decision)
+    tickers[tickers.index(ticker)] = updated
+
+
+@dataclass
+class DividendRunSummary:
+    looked_up: int = 0
+    notified: int = 0
+    adopted: int = 0
+    unavailable: int = 0
+
+    def __str__(self) -> str:
+        return (
+            f"lookups={self.looked_up} notified={self.notified} "
+            f"adopted={self.adopted} unavailable={self.unavailable}"
+        )
+
+
+def dividend_watch(
+    source: DividendSource,
+    mailer: Mailer,
+    path: Path = watchlist.DEFAULT_PATH,
+    key: str | None = None,
+    today: date | None = None,
+    delay: float = DELAY_BETWEEN_LOOKUPS,
+    persist: bool = True,
+) -> DividendRunSummary:
+    """Detect a newly distributed dividend on a held ticker and notify.
+
+    Held only: a dividend is cash landing in the portfolio, which is what makes it
+    actionable for reinvestment — a watched-only ticker pays nothing. No window, unlike
+    `results_watch`: no vendor here publishes a forward payment date for every exchange this
+    watchlist covers, Milan included, so the only usable signal is a new entry appearing in
+    the historical series (see `DividendSource`), and that is checked on every run rather
+    than only inside a schedule-derived window.
+    """
+    today = today or today_utc()
+    tickers = watchlist.load(path, key=key)
+    held = [t for t in tickers if t.label is Label.HELD]
+    summary = DividendRunSummary()
+    labels = render.labels_of(tickers)
+
+    for ticker in _spaced(held, delay):
+        try:
+            history = source.history(ticker.symbol)
+        except SourceUnavailable as exc:
+            summary.unavailable += 1
+            log.warning("%s: unavailable, will retry next run (%s)", ticker.symbol, exc)
+            continue
+
+        summary.looked_up += 1
+        decision = digest.classify_dividend(ticker, history, today)
+
+        if decision.outcome is digest.DividendOutcome.NOTIFY:
+            try:
+                mailer.send(
+                    render.dividend_subject(decision, labels[ticker.symbol]),
+                    render.dividend_body(decision, labels[ticker.symbol]),
+                )
+            except Exception:
+                # Deliberately not stamping: retried next run, same as results_watch.
+                log.exception(
+                    "%s: dividend delivery failed, leaving it unnotified for retry", ticker.symbol
+                )
+                continue
+            _apply_dividend(tickers, ticker, decision)
+            summary.notified += 1
+            log.info("%s: dividend notified (%s)", ticker.symbol, decision.dividend.ex_date)
+        elif decision.outcome is digest.DividendOutcome.ADOPTED:
+            # No mail to fail, so the stamp is safe to write immediately.
+            _apply_dividend(tickers, ticker, decision)
+            summary.adopted += 1
+            log.info(
+                "%s: dividend adopted at %s without notifying",
+                ticker.symbol,
+                decision.dividend.ex_date,
+            )
+
+    if persist:
+        watchlist.save(tickers, path, key=key)
+    else:
+        log.info("dry run: state not written")
+    log.info("dividend watch: %s", summary)
+    return summary
+
+
+def _apply_dividend(
+    tickers: list[TrackedTicker], ticker: TrackedTicker, decision: digest.DividendDecision
+) -> None:
+    updated = digest.apply_dividend(ticker, decision)
     tickers[tickers.index(ticker)] = updated
 
 

@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
-from .models import Revenue, TickerEarnings
+from .models import Dividend, Revenue, TickerEarnings
 
 
 class SourceError(RuntimeError):
@@ -48,6 +48,18 @@ class EarningsSource(Protocol):
 
         Separate from `fetch` because it costs extra requests and is only wanted for the
         handful of tickers actually being notified — never for the window check.
+        """
+        ...
+
+
+@runtime_checkable
+class DividendSource(Protocol):
+    def history(self, symbol: str) -> tuple[Dividend, ...]:
+        """Every dividend on record for this symbol, in whatever order the vendor holds it.
+
+        No forward date, unlike `EarningsSource.fetch` — no vendor here publishes one
+        reliably across every exchange this watchlist covers, so distribution is detected by
+        a new entry appearing in this history rather than by a window opening and closing.
         """
         ...
 

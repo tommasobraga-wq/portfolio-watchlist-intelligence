@@ -1,13 +1,14 @@
 """Orchestration tests. No network, no SMTP, no clock — everything injected."""
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from fakes import FakeEarningsSource
+from fakes import FakeDividendSource, FakeEarningsSource
 from pwi import jobs, watchlist
-from pwi.models import EarningsReport, Label, TickerEarnings, TrackedTicker
+from pwi.models import Dividend, EarningsReport, Label, TickerEarnings, TrackedTicker
 from pwi.sources import SourceUnavailable
 
 KEY = "9syDlxKZzB2s0IXSXV0Mbuj78mYvMu7924cMt2s28To="  # test-only, not a real secret
@@ -27,6 +28,10 @@ class SpyMailer:
 
 def report(when: date, eps: float = 1.80) -> EarningsReport:
     return EarningsReport("UCG.MI", when, when, eps, 1.79, 0.55)
+
+
+def dividend(symbol: str, ex_date: date, amount: str = "1.72") -> Dividend:
+    return Dividend(symbol, ex_date, Decimal(amount))
 
 
 @pytest.fixture
@@ -206,3 +211,88 @@ class TestCalendarSync:
         jobs.calendar_sync(FakeEarningsSource(), path, key=KEY, delay=0)
 
         assert read(path)["GOAI-EUR.MI"].next_earnings_date is None
+
+
+class TestDividendWatch:
+    def test_only_held_tickers_are_looked_up(self, store) -> None:
+        path = store(
+            [
+                TrackedTicker("UCG.MI", Label.HELD),
+                TrackedTicker("ENEL.MI", Label.WATCHING),  # not held, pays nothing to us
+            ]
+        )
+        source = FakeDividendSource({"UCG.MI": (dividend("UCG.MI", TODAY),)})
+
+        jobs.dividend_watch(source, SpyMailer(), path, key=KEY, today=TODAY, delay=0)
+
+        assert source.fetched == ["UCG.MI"]
+
+    def test_a_fresh_first_sighting_is_notified_and_stamped(self, store) -> None:
+        path = store([TrackedTicker("UCG.MI", Label.HELD)])
+        source = FakeDividendSource({"UCG.MI": (dividend("UCG.MI", TODAY),)})
+        mailer = SpyMailer()
+
+        summary = jobs.dividend_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.notified == 1
+        assert "UCG.MI" in mailer.sent[0][0]
+        assert read(path)["UCG.MI"].last_notified_dividend_date == TODAY
+
+    def test_a_stale_first_sighting_is_adopted_without_mail(self, store) -> None:
+        # A newly tracked ticker with years of dividend history must not fire off a
+        # notification about an old payment — the same bootstrap rule as earnings.
+        path = store([TrackedTicker("UCG.MI", Label.HELD)])
+        old = dividend("UCG.MI", date(2020, 1, 1))
+        mailer = SpyMailer()
+
+        summary = jobs.dividend_watch(
+            FakeDividendSource({"UCG.MI": (old,)}), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert summary.adopted == 1
+        assert mailer.sent == []
+        assert read(path)["UCG.MI"].last_notified_dividend_date == date(2020, 1, 1)
+
+    def test_the_same_dividend_is_never_sent_twice(self, store) -> None:
+        path = store([TrackedTicker("UCG.MI", Label.HELD)])
+        source = FakeDividendSource({"UCG.MI": (dividend("UCG.MI", TODAY),)})
+        mailer = SpyMailer()
+
+        jobs.dividend_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+        jobs.dividend_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert len(mailer.sent) == 1
+
+    def test_a_failed_send_leaves_the_dividend_unstamped(self, store) -> None:
+        path = store([TrackedTicker("UCG.MI", Label.HELD)])
+        source = FakeDividendSource({"UCG.MI": (dividend("UCG.MI", TODAY),)})
+
+        summary = jobs.dividend_watch(
+            source, SpyMailer(fail=True), path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert summary.notified == 0
+        assert read(path)["UCG.MI"].last_notified_dividend_date is None
+
+    def test_one_throttled_ticker_does_not_stop_the_others(self, store) -> None:
+        path = store([TrackedTicker("FBK.MI", Label.HELD), TrackedTicker("UCG.MI", Label.HELD)])
+        source = FakeDividendSource(
+            {"UCG.MI": (dividend("UCG.MI", TODAY),)}, unavailable={"FBK.MI"}
+        )
+        mailer = SpyMailer()
+
+        summary = jobs.dividend_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.unavailable == 1
+        assert summary.notified == 1
+
+    def test_no_dividend_ever_is_silent(self, store) -> None:
+        path = store([TrackedTicker("GOAI-EUR.MI", Label.HELD)])  # ETF, pays nothing
+        mailer = SpyMailer()
+
+        summary = jobs.dividend_watch(
+            FakeDividendSource(), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert summary.notified == 0
+        assert mailer.sent == []

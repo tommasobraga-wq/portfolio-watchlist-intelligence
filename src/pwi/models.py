@@ -22,6 +22,11 @@ class TrackedTicker:
     next_earnings_date: date | None = None
     # Fiscal period ("2025-Q3") already notified, guarding against duplicate alerts.
     last_notified_period: str | None = None
+    # Ex-dividend date of the last dividend notified, guarding against duplicate alerts.
+    # There is no forward-looking counterpart to `next_earnings_date`: Yahoo never publishes
+    # a forward payment date for every exchange this watchlist covers (Milan included), so
+    # dividend detection has no window to open and close — see `Dividend`.
+    last_notified_dividend_date: date | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,6 +56,21 @@ class EarningsReport:
         if self.reported_eps is None or self.estimated_eps is None:
             return None
         return self.reported_eps > self.estimated_eps
+
+
+@dataclass(slots=True, frozen=True)
+class Dividend:
+    """One dividend payment, keyed by ex-dividend date.
+
+    Ex-date, not payment date: it is the only date Yahoo exposes consistently across every
+    exchange this watchlist covers. Milan tickers never carry a forward payment date, only
+    a forward ex-dividend date, and the historical series (`t.dividends`) is itself indexed
+    by ex-date. Using anything else would silently drop Milan holdings from detection.
+    """
+
+    symbol: str
+    ex_date: date
+    amount: Decimal
 
 
 @dataclass(slots=True, frozen=True)

@@ -1,20 +1,24 @@
 """The logic that cannot be tested against the live source, tested against invented dates."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from pwi.digest import (
+    DIVIDEND_FRESH_DAYS,
+    DividendOutcome,
     Outcome,
     apply,
+    apply_dividend,
     classify,
+    classify_dividend,
     is_in_window,
     is_source_stale,
     reaction,
     to_report,
 )
-from pwi.models import EarningsReport, Label, TrackedTicker
+from pwi.models import Dividend, EarningsReport, Label, TrackedTicker
 
 TODAY = date(2026, 10, 22)
 
@@ -273,3 +277,110 @@ class TestPriceReaction:
 
     def test_an_unknown_publication_date_yields_nothing(self) -> None:
         assert reaction(self.CLOSES, None).day_move_pct is None
+
+
+def held(dividend_notified: date | None = None) -> TrackedTicker:
+    return TrackedTicker("UCG.MI", Label.HELD, last_notified_dividend_date=dividend_notified)
+
+
+def dividend(ex_date: date, amount: str = "1.72") -> Dividend:
+    return Dividend("UCG.MI", ex_date, Decimal(amount))
+
+
+class TestClassifyDividend:
+    def test_a_new_ticker_with_a_stale_history_is_adopted_not_notified(self) -> None:
+        # First-run bootstrap: a symbol with years of dividend history must not fire off a
+        # notification about an old payment, mirroring FRESH_RESULT_DAYS for earnings.
+        old = dividend(TODAY - timedelta(days=DIVIDEND_FRESH_DAYS + 1))
+
+        d = classify_dividend(held(), (old,), TODAY)
+
+        assert d.outcome is DividendOutcome.ADOPTED
+        assert d.dividend == old
+
+    def test_a_new_ticker_with_a_recent_payment_is_notified(self) -> None:
+        # A payment inside the freshness window on first sighting is real news, not history
+        # — the same escape hatch `classify` has for a fresh first result.
+        recent = dividend(TODAY - timedelta(days=DIVIDEND_FRESH_DAYS - 1))
+
+        d = classify_dividend(held(), (recent,), TODAY)
+
+        assert d.outcome is DividendOutcome.NOTIFY
+        assert d.dividend == recent
+
+    def test_a_dividend_newer_than_the_last_notified_one_is_notified(self) -> None:
+        older_notified = TODAY - timedelta(days=90)
+        newer = dividend(TODAY - timedelta(days=1))
+
+        d = classify_dividend(held(dividend_notified=older_notified), (newer,), TODAY)
+
+        assert d.outcome is DividendOutcome.NOTIFY
+
+    def test_the_already_notified_dividend_is_silent(self) -> None:
+        notified_on = TODAY - timedelta(days=5)
+        same = dividend(notified_on)
+
+        d = classify_dividend(held(dividend_notified=notified_on), (same,), TODAY)
+
+        assert d.outcome is DividendOutcome.NOTHING_NEW
+
+    def test_no_history_at_all_is_silent(self) -> None:
+        d = classify_dividend(held(), (), TODAY)
+
+        assert d.outcome is DividendOutcome.NOTHING_NEW
+        assert d.dividend is None
+
+    def test_only_the_newest_entry_in_history_is_considered(self) -> None:
+        # A source may return several years of payments in one call; only the newest one
+        # can possibly be news.
+        older_notified = TODAY - timedelta(days=200)
+        oldest = dividend(TODAY - timedelta(days=190), amount="1.00")
+        newest = dividend(TODAY - timedelta(days=1), amount="1.72")
+
+        d = classify_dividend(held(dividend_notified=older_notified), (oldest, newest), TODAY)
+
+        assert d.outcome is DividendOutcome.NOTIFY
+        assert d.dividend == newest
+
+
+class TestApplyDividend:
+    def test_notify_stamps_the_ex_date(self) -> None:
+        paid = dividend(TODAY)
+        decision = classify_dividend(held(), (paid,), TODAY)
+
+        updated = apply_dividend(held(), decision)
+
+        assert updated.last_notified_dividend_date == TODAY
+
+    def test_nothing_new_leaves_the_ticker_untouched(self) -> None:
+        notified_on = TODAY - timedelta(days=5)
+        decision = classify_dividend(
+            held(dividend_notified=notified_on), (dividend(notified_on),), TODAY
+        )
+
+        updated = apply_dividend(held(dividend_notified=notified_on), decision)
+
+        assert updated.last_notified_dividend_date == notified_on
+
+    def test_applying_a_dividend_decision_never_touches_earnings_state(self) -> None:
+        # digest.apply and digest.apply_dividend must compose: notifying on one axis must
+        # never clobber state the other axis owns.
+        ticker = TrackedTicker(
+            "UCG.MI", Label.HELD, next_earnings_date=TODAY, last_notified_period="2026-Q3"
+        )
+        decision = classify_dividend(ticker, (dividend(TODAY),), TODAY)
+
+        updated = apply_dividend(ticker, decision)
+
+        assert updated.next_earnings_date == TODAY
+        assert updated.last_notified_period == "2026-Q3"
+
+    def test_applying_an_earnings_decision_never_touches_dividend_state(self) -> None:
+        dividend_notified = TODAY - timedelta(days=30)
+        t = ticker(notified=None)
+        t.last_notified_dividend_date = dividend_notified
+        decision = classify(t, report(), TODAY)
+
+        updated = apply(t, decision)
+
+        assert updated.last_notified_dividend_date == dividend_notified

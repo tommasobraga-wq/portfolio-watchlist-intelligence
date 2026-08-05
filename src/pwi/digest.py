@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
-from .models import EarningsReport, TrackedTicker
+from .models import Dividend, EarningsReport, TrackedTicker
 
 # Expected dates slip forward far more often than backward, so the window is asymmetric.
 WINDOW_OPENS_DAYS_BEFORE = 2
@@ -30,6 +30,12 @@ STALE_HISTORY_DAYS = 400
 # A result found on a ticker we have never notified before is treated as genuinely new if
 # it is this recent; older than that, it is history and gets absorbed silently.
 FRESH_RESULT_DAYS = 3
+
+# Same bootstrap problem as FRESH_RESULT_DAYS, sized for dividends instead: Yahoo's
+# historical series was observed to lag the ex-dividend date by up to five days (JEPI: 2
+# days; O: 5 days, both confirmed present), so a shorter window would risk treating a
+# genuinely fresh distribution as old history on a newly tracked ticker.
+DIVIDEND_FRESH_DAYS = 10
 
 
 class Outcome(StrEnum):
@@ -192,6 +198,7 @@ def apply(ticker: TrackedTicker, decision: Decision) -> TrackedTicker:
         label=ticker.label,
         next_earnings_date=None,
         last_notified_period=decision.report.period,
+        last_notified_dividend_date=ticker.last_notified_dividend_date,
     )
 
 
@@ -200,3 +207,61 @@ def to_report(decisions: list[Decision]) -> tuple[list[Decision], list[Decision]
     published = [d for d in decisions if d.outcome is Outcome.NOTIFY]
     overdue = [d for d in decisions if d.outcome is Outcome.OVERDUE]
     return published, overdue
+
+
+class DividendOutcome(StrEnum):
+    NOTIFY = "notify"
+    NOTHING_NEW = "nothing_new"
+    ADOPTED = "adopted"  # first sighting, recorded without notifying
+
+
+@dataclass(frozen=True, slots=True)
+class DividendDecision:
+    symbol: str
+    outcome: DividendOutcome
+    dividend: Dividend | None = None
+
+
+def classify_dividend(
+    ticker: TrackedTicker, history: tuple[Dividend, ...], today: date
+) -> DividendDecision:
+    """Decide what to do about the newest dividend a source reports, if any.
+
+    No window, no overdue concept — unlike earnings, a dividend is never "expected and
+    missing": a company simply hasn't stacked one yet. The only question is whether the
+    newest entry in `history` is one we have already notified.
+    """
+    if not history:
+        return DividendDecision(ticker.symbol, DividendOutcome.NOTHING_NEW)
+
+    latest = max(history, key=lambda d: d.ex_date)
+
+    if (
+        ticker.last_notified_dividend_date is not None
+        and latest.ex_date <= ticker.last_notified_dividend_date
+    ):
+        return DividendDecision(ticker.symbol, DividendOutcome.NOTHING_NEW, dividend=latest)
+
+    if ticker.last_notified_dividend_date is None:
+        # First time this ticker's dividend history has been looked at. Absorb it quietly
+        # unless the newest entry is recent enough to be real news — the same first-run
+        # bootstrap problem `classify` solves for earnings, via FRESH_RESULT_DAYS there.
+        if (today - latest.ex_date).days <= DIVIDEND_FRESH_DAYS:
+            return DividendDecision(ticker.symbol, DividendOutcome.NOTIFY, dividend=latest)
+        return DividendDecision(ticker.symbol, DividendOutcome.ADOPTED, dividend=latest)
+
+    return DividendDecision(ticker.symbol, DividendOutcome.NOTIFY, dividend=latest)
+
+
+def apply_dividend(ticker: TrackedTicker, decision: DividendDecision) -> TrackedTicker:
+    """The state change a dividend decision implies. Returns a new record; does not mutate."""
+    if decision.outcome not in (DividendOutcome.NOTIFY, DividendOutcome.ADOPTED):
+        return ticker
+    assert decision.dividend is not None
+    return TrackedTicker(
+        symbol=ticker.symbol,
+        label=ticker.label,
+        next_earnings_date=ticker.next_earnings_date,
+        last_notified_period=ticker.last_notified_period,
+        last_notified_dividend_date=decision.dividend.ex_date,
+    )

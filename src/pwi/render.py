@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from .digest import Decision, PriceReaction, is_source_stale
+from .digest import Decision, DividendDecision, PriceReaction, is_source_stale
 from .models import EarningsReport, Label, Revenue, TickerEarnings
 
 QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}"
@@ -101,6 +101,26 @@ def _recent_quarters(earnings: TickerEarnings, limit: int = 4) -> list[str]:
     return rows if len(rows) >= 2 else []
 
 
+def dividend_subject(decision: DividendDecision, label: Label) -> str:
+    dividend = decision.dividend
+    assert dividend is not None
+    return f"{decision.symbol} — dividendo {_share(dividend.amount)}"
+
+
+def dividend_body(decision: DividendDecision, label: Label) -> str:
+    dividend = decision.dividend
+    assert dividend is not None
+    lines = [
+        f"{decision.symbol} — {_LABEL_IT[label]}",
+        "",
+        f"Stacco il {_day(dividend.ex_date)}.",
+        f"  per azione   {_share(dividend.amount)}",
+        "",
+        f"Fonte: {QUOTE_URL.format(symbol=decision.symbol)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def overdue_subject(decisions: list[Decision]) -> str:
     if len(decisions) == 1:
         return f"Risultati attesi e non trovati: {decisions[0].symbol}"
@@ -157,6 +177,12 @@ def _price(value) -> str:
 
 def _num(value: float | None) -> str:
     return "n.d." if value is None else f"{value:.2f}".replace(".", ",")
+
+
+def _share(value: Decimal) -> str:
+    """Per-share amounts run to four decimals (Yahoo reports e.g. 1.7208), unlike prices."""
+    text = f"{float(value):.4f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
 
 
 def _money(value: Decimal) -> str:

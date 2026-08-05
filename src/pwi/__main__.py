@@ -3,6 +3,7 @@
 python -m pwi calendar-sync
 python -m pwi results-watch
 python -m pwi results-watch --dry-run
+python -m pwi dividend-watch
 """
 
 from __future__ import annotations
@@ -15,12 +16,12 @@ import warnings
 from . import jobs
 from .config import load_environment
 from .mailer import Mailer
-from .yahoo import YahooEarnings, YahooPrices
+from .yahoo import YahooDividends, YahooEarnings, YahooPrices
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pwi")
-    parser.add_argument("job", choices=["calendar-sync", "results-watch"])
+    parser.add_argument("job", choices=["calendar-sync", "results-watch", "dividend-watch"])
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -42,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     mailer = _PrintingMailer() if args.dry_run else Mailer.from_env()
+
+    if args.job == "dividend-watch":
+        jobs.dividend_watch(YahooDividends(), mailer, persist=not args.dry_run)
+        return 0
+
     jobs.results_watch(source, mailer, persist=not args.dry_run, prices=YahooPrices())
     return 0
 

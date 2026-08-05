@@ -6,8 +6,8 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from pwi.sources import EarningsSource, SourceUnavailable
-from pwi.yahoo import COL_ESTIMATE, COL_REPORTED, COL_SURPRISE, YahooEarnings
+from pwi.sources import DividendSource, EarningsSource, SourceUnavailable
+from pwi.yahoo import COL_ESTIMATE, COL_REPORTED, COL_SURPRISE, YahooDividends, YahooEarnings
 
 # Shaped after the live response for UCG.MI: newest first, tz-aware index, and the
 # not-yet-reported quarter carrying NaN in Reported EPS.
@@ -126,3 +126,53 @@ class TestRevenue:
         revenue = _source(income=pd.DataFrame(), calendar={}).revenue("UCG.MI")
 
         assert revenue.actual is None and revenue.estimate is None
+
+
+# Shaped after the live probe against UCG.MI: ex-date index, small decimal values.
+DIVIDENDS = pd.Series(
+    [0.9872, 1.8029, 1.7208],
+    index=pd.DatetimeIndex(
+        ["2024-04-22 09:00:00+02:00", "2025-04-22 09:00:00+02:00", "2026-04-20 09:00:00+02:00"],
+        name="Date",
+    ),
+    name="Dividends",
+)
+
+
+def _dividend_source(series=DIVIDENDS, error: Exception | None = None):
+    class FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def dividends(self):
+            if error is not None:
+                raise error
+            return series
+
+    return YahooDividends(ticker_factory=FakeTicker)
+
+
+class TestDividends:
+    def test_satisfies_the_protocol(self) -> None:
+        assert isinstance(_dividend_source(), DividendSource)
+
+    def test_history_is_returned_with_the_ex_date_and_decimal_amount(self) -> None:
+        history = _dividend_source().history("UCG.MI")
+
+        assert [d.ex_date for d in history] == [
+            date(2024, 4, 22),
+            date(2025, 4, 22),
+            date(2026, 4, 20),
+        ]
+        assert history[-1].amount == Decimal("1.7208")
+        assert all(d.symbol == "UCG.MI" for d in history)
+
+    def test_no_history_is_empty_not_an_error(self) -> None:
+        empty = pd.Series([], index=pd.DatetimeIndex([]), dtype=float)
+
+        assert _dividend_source(empty).history("NOPE") == ()
+
+    def test_lookup_failure_is_source_unavailable(self) -> None:
+        with pytest.raises(SourceUnavailable):
+            _dividend_source(error=RuntimeError("rate limited")).history("UCG.MI")
