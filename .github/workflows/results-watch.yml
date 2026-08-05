@@ -32,6 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A scheduled run is pinned to the commit that was current when it was *queued*, not
+      # when it starts. Runs serialised behind the concurrency group can therefore begin
+      # against state another run has already advanced, and then find their own state
+      # commit unmergeable. Read the current tip instead of the pinned one.
+      - name: Take the current state
+        run: |
+          git fetch origin ${{ github.ref_name }}
+          git reset --hard origin/${{ github.ref_name }}
+
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -56,6 +65,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/watchlist.enc
           git commit -m "Results watch: record notified quarters [skip ci]"
-          # Another run may have pushed while this one worked; rebase rather than fail.
-          git pull --rebase --autostash origin ${{ github.ref_name }}
+          # No rebase here: the watchlist is encrypted, so every byte changes on every
+          # write and git can never merge two versions of it. If the push is rejected,
+          # something moved the branch during the run — fail, and let the next run redo
+          # the work. That resends a mail rather than losing one, which is the direction
+          # this system errs in deliberately.
           git push
