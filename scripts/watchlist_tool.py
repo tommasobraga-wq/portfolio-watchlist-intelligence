@@ -40,7 +40,7 @@ def generate_key() -> int:
 def show() -> int:
     for t in load():
         held = "held" if t.label == "held" else "watching"
-        print(f"{t.symbol:<10} {held:<9} next={t.next_earnings_date} last={t.last_notified_period}")
+        print(f"{t.symbol:<10} {held:<9} next={t.next_earnings_date} last={t.last_notified_date}")
     return 0
 
 

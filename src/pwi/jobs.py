@@ -39,6 +39,7 @@ class RunSummary:
     looked_up: int = 0
     notified: int = 0
     adopted: int = 0
+    due_today: int = 0
     overdue: int = 0
     unavailable: int = 0
     dates_changed: int = 0
@@ -46,7 +47,7 @@ class RunSummary:
     def __str__(self) -> str:
         return (
             f"lookups={self.looked_up} notified={self.notified} adopted={self.adopted} "
-            f"overdue={self.overdue} unavailable={self.unavailable} "
+            f"due_today={self.due_today} overdue={self.overdue} unavailable={self.unavailable} "
             f"dates_changed={self.dates_changed}"
         )
 
@@ -110,7 +111,11 @@ def results_watch(
     """Detect published results and notify.
 
     Runs often, but only touches tickers inside their reporting window — on a quiet day it
-    makes no requests at all.
+    makes no requests at all. Exception: a ticker with no expected date has no window to be
+    inside of, since `is_in_window` treats `None` as never-due. Skipping it there as well
+    would exclude it permanently rather than temporarily — Yahoo not exposing a forward date
+    is not the same as nothing being due (see TEAM, 2026-08-06: reported with zero forward
+    row ever listed) — so it is always checked until Calendar Sync gives it a real date.
     """
     today = today or today_utc()
     tickers = watchlist.load(path, key=key)
@@ -118,7 +123,11 @@ def results_watch(
     overdue: list[digest.Decision] = []
     labels = render.labels_of(tickers)
 
-    due = [t for t in tickers if digest.is_in_window(t.next_earnings_date, today)]
+    due = [
+        t
+        for t in tickers
+        if t.next_earnings_date is None or digest.is_in_window(t.next_earnings_date, today)
+    ]
     log.info("%d of %d tickers in window", len(due), len(tickers))
 
     for ticker in _spaced(due, delay):
@@ -141,6 +150,19 @@ def results_watch(
             _apply(tickers, ticker, decision)
             summary.adopted += 1
             log.info("%s: adopted at %s without notifying", ticker.symbol, decision.report.period)
+        elif decision.outcome is digest.Outcome.DUE_TODAY:
+            try:
+                mailer.send(
+                    render.due_today_subject(decision, labels[ticker.symbol]),
+                    render.due_today_body(decision, labels[ticker.symbol]),
+                )
+            except Exception:
+                # Deliberately not stamping: retried next run, same as a failed NOTIFY.
+                log.exception("%s: due-today notice failed, will retry next run", ticker.symbol)
+            else:
+                _apply(tickers, ticker, decision)
+                summary.due_today += 1
+                log.info("%s: due-today notice sent", ticker.symbol)
         elif decision.outcome is digest.Outcome.OVERDUE:
             overdue.append(decision)
 

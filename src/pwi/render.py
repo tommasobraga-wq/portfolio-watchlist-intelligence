@@ -5,6 +5,10 @@ the inbox without opening it, and each result goes out as soon as it is detected
 warnings are grouped instead — they are maintenance signals, not news, and one mail per
 ticker would be noise.
 
+A same-day heads-up with no data yet is also sent per ticker, immediately, the first time
+the expected date arrives and nothing has been published — see `due_today_body`. It is
+deliberately not batched like overdue: the whole point is not to wait for a periodic digest.
+
 Never prints the fiscal-quarter label: it is derived from the announcement date and sits a
 quarter off, so it would read "Q3" over Q2 figures. See the ADR.
 """
@@ -101,6 +105,25 @@ def _recent_quarters(earnings: TickerEarnings, limit: int = 4) -> list[str]:
     return rows if len(rows) >= 2 else []
 
 
+def due_today_subject(decision: Decision, label: Label) -> str:
+    return f"{decision.symbol} — risultati attesi oggi"
+
+
+def due_today_body(decision: Decision, label: Label) -> str:
+    lines = [
+        f"{decision.symbol} — {_LABEL_IT[label]}",
+        "",
+        f"Risultati attesi oggi ({_day(decision.expected_on)}), non ancora pubblicati presso",
+        "la fonte.",
+        "",
+        "Avviso preventivo, senza dati: la mail con i numeri arriverà appena la fonte li",
+        "pubblica.",
+        "",
+        f"Fonte: {QUOTE_URL.format(symbol=decision.symbol)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def dividend_subject(decision: DividendDecision, label: Label) -> str:
     dividend = decision.dividend
     assert dividend is not None
@@ -143,6 +166,11 @@ def overdue_body(
             f"{d.symbol} — {_LABEL_IT[label]}",
             f"  attesi il    {_day(d.expected_on)} ({d.days_overdue} giorni fa)",
         ]
+        if d.heads_up_already_sent:
+            # Otherwise this reads as a second, unrelated alert about the same ticker.
+            lines.append(
+                "  avviso       già segnalato il giorno stesso, senza dati (vedi mail precedente)"
+            )
         if is_source_stale(d, today):
             # A years-old last figure is not a delay: the source stopped publishing this
             # security's results. Saying so turns a vague prompt into a specific one.

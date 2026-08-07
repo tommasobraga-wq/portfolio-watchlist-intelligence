@@ -42,6 +42,7 @@ class Outcome(StrEnum):
     NOTIFY = "notify"
     ALREADY_NOTIFIED = "already_notified"
     NOT_YET_PUBLISHED = "not_yet_published"
+    DUE_TODAY = "due_today"  # expected date is today, nothing published yet
     OVERDUE = "overdue"
     ADOPTED = "adopted"  # first sighting, recorded without notifying
 
@@ -57,6 +58,9 @@ class Decision:
     # cause is a gap in the source rather than a company delaying, and saying so turns a
     # vague "check manually" into a specific, actionable statement.
     source_last_seen: date | None = None
+    # On OVERDUE: whether a DUE_TODAY notice already went out for this cycle, so the reader
+    # is not left wondering whether this is a second, unrelated alert about the same ticker.
+    heads_up_already_sent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,20 +151,29 @@ def _silence(
 ) -> Decision:
     already = report is not None and report.period == ticker.last_notified_period
 
-    if expected is not None and (today - expected).days >= OVERDUE_AFTER_DAYS:
+    if expected is not None:
+        days_late = (today - expected).days
         # The test is whether a result exists *for this reporting cycle*, not whether we
-        # have ever notified anything. Asking the latter suppresses the alert exactly where
-        # it is needed most: a source stuck on a years-old quarter matches
+        # have ever notified anything. Asking the latter suppresses the alert exactly
+        # where it is needed most: a source stuck on a years-old quarter matches
         # `last_notified_period`, which would read as "already handled" and stay silent.
-        if not _covers_cycle(report, expected):
+        covers = _covers_cycle(report, expected)
+
+        if days_late >= OVERDUE_AFTER_DAYS and not covers:
             return Decision(
                 ticker.symbol,
                 Outcome.OVERDUE,
                 report=report,
                 expected_on=expected,
-                days_overdue=(today - expected).days,
+                days_overdue=days_late,
                 source_last_seen=report.reported_date if report else None,
+                heads_up_already_sent=ticker.last_notified_due_date == expected,
             )
+        if days_late == 0 and not covers and ticker.last_notified_due_date != expected:
+            # Today is the expected day itself. Days 1-2 fall through to plain silence
+            # below unchanged — this fires exactly once, on the day itself, so a late
+            # source is not mistaken for one that never checked.
+            return Decision(ticker.symbol, Outcome.DUE_TODAY, report=report, expected_on=expected)
 
     outcome = Outcome.ALREADY_NOTIFIED if already else Outcome.NOT_YET_PUBLISHED
     return Decision(ticker.symbol, outcome, report=report, expected_on=expected)
@@ -190,7 +203,23 @@ def apply(ticker: TrackedTicker, decision: Decision) -> TrackedTicker:
     On NOTIFY and ADOPTED the period is stamped so it is never sent twice, and the expected
     date is cleared: it now points at a quarter already reported, so leaving it would keep
     the ticker inside its window being pointlessly re-queried until the next Calendar Sync.
+    `last_notified_date` is stamped alongside it — the same event, but human-readable, for
+    display (`period` is a de-dup key only, never meant to be read — see its docstring).
+
+    On DUE_TODAY only the day-0 stamp is written: `next_earnings_date` and
+    `last_notified_period` are left untouched, because the ticker must stay in-window so a
+    real result arriving later the same day (or on a subsequent run) is still caught.
     """
+    if decision.outcome is Outcome.DUE_TODAY:
+        return TrackedTicker(
+            symbol=ticker.symbol,
+            label=ticker.label,
+            next_earnings_date=ticker.next_earnings_date,
+            last_notified_period=ticker.last_notified_period,
+            last_notified_dividend_date=ticker.last_notified_dividend_date,
+            last_notified_due_date=decision.expected_on,
+            last_notified_date=ticker.last_notified_date,
+        )
     if decision.outcome not in (Outcome.NOTIFY, Outcome.ADOPTED) or decision.report is None:
         return ticker
     return TrackedTicker(
@@ -199,6 +228,8 @@ def apply(ticker: TrackedTicker, decision: Decision) -> TrackedTicker:
         next_earnings_date=None,
         last_notified_period=decision.report.period,
         last_notified_dividend_date=ticker.last_notified_dividend_date,
+        last_notified_due_date=None,
+        last_notified_date=decision.report.reported_date,
     )
 
 

@@ -27,6 +27,14 @@ class TrackedTicker:
     # a forward payment date for every exchange this watchlist covers (Milan included), so
     # dividend detection has no window to open and close — see `Dividend`.
     last_notified_dividend_date: date | None = None
+    # The `next_earnings_date` for which a day-0 "expected today, no data yet" notice was
+    # already sent, guarding against resending it on every run within the same day.
+    last_notified_due_date: date | None = None
+    # Display-only companion to `last_notified_period`: the actual announcement date of the
+    # last notified report. `period` is a stable de-dup key, not meant to be read by a human
+    # (see its docstring) — this is what a human-facing view like `watchlist_tool.py show`
+    # should print instead.
+    last_notified_date: date | None = None
 
 
 @dataclass(slots=True, frozen=True)

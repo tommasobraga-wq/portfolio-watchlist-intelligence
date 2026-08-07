@@ -55,7 +55,6 @@ class TestResultsWatch:
             [
                 TrackedTicker("UCG.MI", Label.HELD, TODAY, "2026-Q2"),
                 TrackedTicker("AAPL", Label.HELD, date(2027, 1, 1)),  # far away
-                TrackedTicker("GOAI-EUR.MI", Label.HELD, None),  # never reports
             ]
         )
         source = FakeEarningsSource(
@@ -66,6 +65,22 @@ class TestResultsWatch:
 
         # This is what keeps the job nearly free outside earnings season.
         assert source.fetched == ["UCG.MI"]
+
+    def test_a_ticker_with_no_expected_date_is_checked_every_run(self, store) -> None:
+        # Yahoo does not always expose a forward date (TEAM reported 2026-08-06 with no
+        # scheduled row ever listed beforehand). Unlike a genuinely far-off date, `None`
+        # must not be treated as "not due" — that would exclude the ticker permanently
+        # instead of temporarily, since nothing ever re-arms it.
+        path = store([TrackedTicker("GOAI-EUR.MI", Label.HELD, None, "2026-Q1")])
+        source = FakeEarningsSource(
+            {"GOAI-EUR.MI": TickerEarnings("GOAI-EUR.MI", published=(report(TODAY),))}
+        )
+        mailer = SpyMailer()
+
+        summary = jobs.results_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert source.fetched == ["GOAI-EUR.MI"]
+        assert summary.notified == 1
 
     def test_a_published_result_is_notified_and_stamped(self, store) -> None:
         path = store([TrackedTicker("UCG.MI", Label.HELD, TODAY, "2026-Q2")])
@@ -79,6 +94,7 @@ class TestResultsWatch:
         assert summary.notified == 1
         assert "UCG.MI" in mailer.sent[0][0]
         assert read(path)["UCG.MI"].last_notified_period == "2026-Q4"
+        assert read(path)["UCG.MI"].last_notified_date == TODAY
         assert read(path)["UCG.MI"].next_earnings_date is None
 
     def test_a_failed_send_leaves_the_quarter_unnotified(self, store) -> None:
@@ -160,6 +176,67 @@ class TestResultsWatch:
         assert summary.overdue == 2
         assert len(mailer.sent) == 1  # grouped, not one per ticker
         assert "2 titoli" in mailer.sent[0][0]
+
+    def test_overdue_mentions_a_prior_due_today_notice(self, store) -> None:
+        path = store(
+            [
+                TrackedTicker(
+                    "FBK.MI",
+                    Label.HELD,
+                    date(2026, 10, 15),
+                    None,
+                    last_notified_due_date=date(2026, 10, 15),
+                )
+            ]
+        )
+        mailer = SpyMailer()
+
+        jobs.results_watch(FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert "già segnalato" in mailer.sent[0][1]
+
+    def test_a_ticker_due_today_gets_an_immediate_notice_and_is_stamped(self, store) -> None:
+        path = store([TrackedTicker("SPCX", Label.WATCHING, TODAY, None)])
+        mailer = SpyMailer()
+
+        summary = jobs.results_watch(
+            FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert summary.due_today == 1
+        assert len(mailer.sent) == 1
+        assert "SPCX" in mailer.sent[0][0]
+        assert read(path)["SPCX"].last_notified_due_date == TODAY
+        assert read(path)["SPCX"].next_earnings_date == TODAY  # stays in window
+
+    def test_the_due_today_notice_is_not_repeated_within_the_same_day(self, store) -> None:
+        path = store([TrackedTicker("SPCX", Label.WATCHING, TODAY, None)])
+        mailer = SpyMailer()
+
+        jobs.results_watch(FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0)
+        jobs.results_watch(FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert len(mailer.sent) == 1
+
+    def test_a_failed_due_today_send_is_retried_next_run(self, store) -> None:
+        path = store([TrackedTicker("SPCX", Label.WATCHING, TODAY, None)])
+
+        summary = jobs.results_watch(
+            FakeEarningsSource(), SpyMailer(fail=True), path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert summary.due_today == 0
+        assert read(path)["SPCX"].last_notified_due_date is None
+
+    def test_a_real_result_on_the_due_date_is_notified_not_just_flagged_due(self, store) -> None:
+        path = store([TrackedTicker("SPCX", Label.WATCHING, TODAY, "2026-Q2")])
+        source = FakeEarningsSource({"SPCX": TickerEarnings("SPCX", published=(report(TODAY),))})
+        mailer = SpyMailer()
+
+        summary = jobs.results_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.notified == 1
+        assert summary.due_today == 0
 
     def test_revenue_failure_does_not_block_the_result(self, store) -> None:
         path = store([TrackedTicker("UCG.MI", Label.HELD, TODAY, "2026-Q2")])

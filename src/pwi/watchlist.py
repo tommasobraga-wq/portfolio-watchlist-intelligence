@@ -50,6 +50,10 @@ def _to_row(t: TrackedTicker) -> dict:
         "last_notified_dividend_date": (
             t.last_notified_dividend_date.isoformat() if t.last_notified_dividend_date else None
         ),
+        "last_notified_due_date": (
+            t.last_notified_due_date.isoformat() if t.last_notified_due_date else None
+        ),
+        "last_notified_date": (t.last_notified_date.isoformat() if t.last_notified_date else None),
     }
 
 
@@ -62,6 +66,8 @@ def _from_row(row: dict) -> TrackedTicker:
         # Absent on rows written before this field existed — a real watchlist entry, not a
         # bug, so it must default to None rather than fail the load.
         last_notified_dividend_date=_optional_date(row.get("last_notified_dividend_date")),
+        last_notified_due_date=_optional_date(row.get("last_notified_due_date")),
+        last_notified_date=_optional_date(row.get("last_notified_date")),
     )
 
 

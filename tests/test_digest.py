@@ -23,8 +23,20 @@ from pwi.models import Dividend, EarningsReport, Label, TrackedTicker
 TODAY = date(2026, 10, 22)
 
 
-def ticker(next_date: date | None = TODAY, notified: str | None = None) -> TrackedTicker:
-    return TrackedTicker("UCG.MI", Label.HELD, next_date, notified)
+def ticker(
+    next_date: date | None = TODAY,
+    notified: str | None = None,
+    due_notified: date | None = None,
+    notified_on: date | None = None,
+) -> TrackedTicker:
+    return TrackedTicker(
+        "UCG.MI",
+        Label.HELD,
+        next_date,
+        notified,
+        last_notified_due_date=due_notified,
+        last_notified_date=notified_on,
+    )
 
 
 def report(reported_on: date = TODAY, eps: float = 1.80) -> EarningsReport:
@@ -75,6 +87,15 @@ class TestFirstSighting:
 
         assert apply(ticker(notified=None), decision).last_notified_period == "2026-Q3"
 
+    def test_adoption_also_stamps_a_human_readable_date(self) -> None:
+        # `last_notified_period` is a de-dup key only, never meant to be read; this is what
+        # a human-facing view should print instead.
+        decision = classify(ticker(notified=None), report(reported_on=date(2026, 7, 23)), TODAY)
+
+        updated = apply(ticker(notified=None), decision)
+
+        assert updated.last_notified_date == date(2026, 7, 23)
+
 
 class TestDeduplication:
     def test_same_quarter_is_not_sent_twice(self) -> None:
@@ -97,6 +118,7 @@ class TestDeduplication:
         # Derived from the announcement date, not the fiscal period — a stable de-dup key
         # only, never shown to the reader. See the ADR.
         assert updated.last_notified_period == "2026-Q4"
+        assert updated.last_notified_date == TODAY
 
 
 class TestSilence:
@@ -127,6 +149,75 @@ class TestSilence:
         decision = classify(original, None, TODAY)
 
         assert apply(original, decision) == original
+
+
+class TestDueToday:
+    """The SPCX case: a result can sit unpublished at the source for days after the expected
+    date. The user would rather get a timely, data-free heads-up the day it was due than a
+    fully-detailed mail that arrives late — see the day-0 notice this class pins down.
+    """
+
+    def test_fires_exactly_on_the_expected_date(self) -> None:
+        decision = classify(ticker(next_date=TODAY), None, TODAY)
+
+        assert decision.outcome is Outcome.DUE_TODAY
+        assert decision.expected_on == TODAY
+
+    @pytest.mark.parametrize("days_late", [1, 2])
+    def test_days_one_and_two_stay_silent(self, days_late: int) -> None:
+        # The gap up to OVERDUE_AFTER_DAYS is deliberate and unchanged by this feature.
+        decision = classify(ticker(next_date=TODAY), None, TODAY + timedelta(days=days_late))
+
+        assert decision.outcome is Outcome.NOT_YET_PUBLISHED
+
+    def test_does_not_refire_once_stamped_for_this_cycle(self) -> None:
+        decision = classify(ticker(next_date=TODAY, due_notified=TODAY), None, TODAY)
+
+        assert decision.outcome is Outcome.NOT_YET_PUBLISHED
+
+    def test_a_real_result_the_same_day_still_notifies(self) -> None:
+        # Data arriving in time must win over the empty-handed heads-up.
+        decision = classify(ticker(next_date=TODAY, notified="2026-Q2"), report(), TODAY)
+
+        assert decision.outcome is Outcome.NOTIFY
+
+    def test_apply_stamps_the_date_without_clearing_the_window(self) -> None:
+        original = ticker(next_date=TODAY)
+        decision = classify(original, None, TODAY)
+        updated = apply(original, decision)
+
+        assert updated.last_notified_due_date == TODAY
+        assert updated.next_earnings_date == TODAY
+        assert updated.last_notified_period is None
+
+    def test_apply_does_not_wipe_a_prior_notified_date(self) -> None:
+        # Regression: the DUE_TODAY branch rebuilds the record explicitly, and forgetting a
+        # field there resets it to the dataclass default instead of preserving it.
+        original = ticker(next_date=TODAY, notified_on=date(2026, 7, 23))
+        decision = classify(original, None, TODAY)
+        updated = apply(original, decision)
+
+        assert updated.last_notified_date == date(2026, 7, 23)
+
+    def test_notify_clears_the_due_date_stamp(self) -> None:
+        original = ticker(next_date=TODAY, notified="2026-Q2", due_notified=TODAY)
+        decision = classify(original, report(), TODAY)
+        updated = apply(original, decision)
+
+        assert updated.last_notified_due_date is None
+
+    def test_overdue_acknowledges_a_prior_heads_up(self) -> None:
+        expected = date(2026, 10, 19)
+        decision = classify(ticker(next_date=expected, due_notified=expected), None, TODAY)
+
+        assert decision.outcome is Outcome.OVERDUE
+        assert decision.heads_up_already_sent is True
+
+    def test_overdue_without_a_prior_heads_up_is_unflagged(self) -> None:
+        decision = classify(ticker(next_date=date(2026, 10, 19)), None, TODAY)
+
+        assert decision.outcome is Outcome.OVERDUE
+        assert decision.heads_up_already_sent is False
 
 
 class TestSourceWithAStaleHistory:

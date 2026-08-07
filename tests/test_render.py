@@ -6,6 +6,8 @@ from pwi.models import Dividend, EarningsReport, Label, Revenue, TickerEarnings
 from pwi.render import (
     dividend_body,
     dividend_subject,
+    due_today_body,
+    due_today_subject,
     overdue_body,
     overdue_subject,
     result_body,
@@ -200,3 +202,44 @@ class TestOverdue:
         assert "verifica manuale" in text
         assert "FBK.MI — osservato" in text
         assert "PRY.MI — in portafoglio" in text
+
+    def test_body_acknowledges_a_prior_heads_up(self) -> None:
+        already = Decision(
+            "FBK.MI",
+            Outcome.OVERDUE,
+            expected_on=date(2026, 11, 5),
+            days_overdue=4,
+            heads_up_already_sent=True,
+        )
+
+        text = overdue_body([already], {"FBK.MI": Label.WATCHING})
+
+        assert "già segnalato" in text
+
+    def test_body_says_nothing_extra_without_a_prior_heads_up(self) -> None:
+        text = overdue_body(self.LATE[:1], {"FBK.MI": Label.WATCHING})
+
+        assert "già segnalato" not in text
+
+
+class TestDueToday:
+    DECISION = Decision("SPCX", Outcome.DUE_TODAY, expected_on=date(2026, 8, 4))
+
+    def test_subject_names_the_ticker(self) -> None:
+        assert due_today_subject(self.DECISION, Label.WATCHING) == "SPCX — risultati attesi oggi"
+
+    def test_body_carries_no_figures(self) -> None:
+        text = due_today_body(self.DECISION, Label.WATCHING)
+
+        assert "SPCX — osservato" in text
+        assert "04/08/2026" in text
+        assert "non ancora pubblicati" in text
+        assert "senza dati" in text
+        # It must never look like an actual result: no EPS/surprise vocabulary.
+        assert "consuntivo" not in text
+        assert "scarto" not in text
+
+    def test_body_names_the_source(self) -> None:
+        text = due_today_body(self.DECISION, Label.HELD)
+
+        assert "finance.yahoo.com/quote/SPCX" in text
