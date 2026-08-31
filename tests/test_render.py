@@ -117,12 +117,9 @@ class TestBody:
 
     def test_missing_revenue_is_stated_as_a_source_lag(self) -> None:
         # Silence here would read as "no revenue", which is wrong and alarming.
-        text = result_body(
-            decision(), Label.HELD, revenue=Revenue(actual=None, estimate=Decimal("6480867890"))
-        )
+        text = result_body(decision(), Label.HELD, revenue=Revenue(actual=None))
 
         assert "non ancora disponibile presso la fonte" in text
-        assert "6,48 mld" in text
 
     def test_revenue_in_billions_is_scaled(self) -> None:
         text = result_body(decision(), Label.HELD, revenue=Revenue(actual=Decimal("7073000000")))

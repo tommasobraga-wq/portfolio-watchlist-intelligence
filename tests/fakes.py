@@ -38,7 +38,7 @@ class FakeEarningsSource:
         self._guard(symbol)
         return self._earnings.get(symbol, TickerEarnings(symbol))
 
-    def revenue(self, symbol: str) -> Revenue:
+    def revenue(self, symbol: str, reported_date: date | None = None) -> Revenue:
         self.revenue_calls.append(symbol)
         self._guard(symbol)
         return self._revenues.get(symbol, Revenue())

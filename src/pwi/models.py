@@ -83,16 +83,19 @@ class Dividend:
 
 @dataclass(slots=True, frozen=True)
 class Revenue:
-    """Revenue around the quarter just reported.
+    """Revenue for the quarter just reported.
 
     `actual` lags badly: Yahoo refreshes `earnings_dates` at publication but the income
     statement much later — UCG.MI still had no June figure two weeks after reporting. So
-    `actual` is frequently None at notification time and `estimate` carries the message.
+    `actual` is frequently None at notification time.
+
+    There is deliberately no `estimate` field: Yahoo's only revenue estimate
+    (`calendar["Revenue Average"]`) is consensus for the *next* unreported quarter, not the
+    one just published — pairing it with `actual` compares two different fiscal periods
+    (confirmed live against NVDA: an August actual shown against an estimate for November).
     """
 
     actual: Decimal | None = None
-    estimate: Decimal | None = None
-    currency: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

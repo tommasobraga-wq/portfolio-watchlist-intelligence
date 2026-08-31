@@ -72,7 +72,7 @@ class TestTrackRecord:
 def test_revenue_defaults_to_unknown_rather_than_zero() -> None:
     revenue = FakeEarningsSource().revenue("UCG.MI")
 
-    assert revenue == Revenue(actual=None, estimate=None, currency=None)
+    assert revenue == Revenue(actual=None)
 
 
 def test_price_source_clips_to_range_and_keeps_gaps() -> None:

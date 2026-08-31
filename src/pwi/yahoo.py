@@ -25,6 +25,12 @@ COL_SURPRISE = "Surprise(%)"
 
 REVENUE_ROWS = ("Total Revenue", "Operating Revenue")
 
+# The normal gap between a fiscal quarter's period end and its earnings announcement is
+# 20-45 days. Beyond that, the newest income-statement column is not "not filled in yet"
+# for the quarter just reported — it is an older quarter the statement hasn't moved past,
+# and showing it would misreport an unrelated period as this one's actual revenue.
+REVENUE_ACTUAL_MAX_LAG_DAYS = 75
+
 
 class YahooEarnings:
     """Satisfies `EarningsSource`."""
@@ -72,11 +78,10 @@ class YahooEarnings:
         # quarters are already listed and the nearest one is what the window cares about.
         return TickerEarnings(symbol, min(scheduled) if scheduled else None, tuple(published))
 
-    def revenue(self, symbol: str) -> Revenue:
-        estimate, currency = self._revenue_estimate(symbol)
-        return Revenue(actual=self._revenue_actual(symbol), estimate=estimate, currency=currency)
+    def revenue(self, symbol: str, reported_date: date | None = None) -> Revenue:
+        return Revenue(actual=self._revenue_actual(symbol, reported_date))
 
-    def _revenue_actual(self, symbol: str) -> Decimal | None:
+    def _revenue_actual(self, symbol: str, reported_date: date | None) -> Decimal | None:
         statement = self._call(symbol, lambda t: t.quarterly_income_stmt)
         if statement is None or statement.empty or statement.columns.empty:
             return None
@@ -84,16 +89,16 @@ class YahooEarnings:
             if label in statement.index:
                 # Columns are quarters, newest first; the newest is often still empty
                 # because the income statement lags publication by weeks.
+                column = statement.columns[0]
                 value = statement.loc[label].iloc[0]
-                if not _is_missing(value):
-                    return _as_decimal(value)
+                if _is_missing(value):
+                    return None
+                if reported_date is not None:
+                    lag = (reported_date - _as_date(column)).days
+                    if lag > REVENUE_ACTUAL_MAX_LAG_DAYS:
+                        return None
+                return _as_decimal(value)
         return None
-
-    def _revenue_estimate(self, symbol: str) -> tuple[Decimal | None, str | None]:
-        calendar = self._call(symbol, lambda t: t.calendar)
-        if not isinstance(calendar, dict):
-            return None, None
-        return _as_decimal(calendar.get("Revenue Average")), None
 
     def _call(self, symbol: str, get: Any) -> Any:
         try:

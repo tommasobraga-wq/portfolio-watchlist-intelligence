@@ -197,8 +197,9 @@ def _announce(
     is dropped and the result still goes out. A missing detail must never cost the reader
     the notification itself.
     """
+    reported_date = decision.report.reported_date if decision.report else None
     try:
-        revenue = source.revenue(decision.symbol)
+        revenue = source.revenue(decision.symbol, reported_date)
     except SourceUnavailable:
         revenue = None
 

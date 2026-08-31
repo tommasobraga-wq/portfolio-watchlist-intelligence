@@ -242,7 +242,7 @@ class TestResultsWatch:
         path = store([TrackedTicker("UCG.MI", Label.HELD, TODAY, "2026-Q2")])
 
         class FlakyRevenue(FakeEarningsSource):
-            def revenue(self, symbol: str):
+            def revenue(self, symbol: str, reported_date=None):
                 raise SourceUnavailable("throttled")
 
         source = FlakyRevenue({"UCG.MI": TickerEarnings("UCG.MI", published=(report(TODAY),))})

@@ -43,11 +43,13 @@ class EarningsSource(Protocol):
         """
         ...
 
-    def revenue(self, symbol: str) -> Revenue:
-        """Revenue for the most recent quarter. Both fields may be None.
+    def revenue(self, symbol: str, reported_date: date | None = None) -> Revenue:
+        """Actual revenue for the quarter reported on `reported_date`. May be None.
 
         Separate from `fetch` because it costs extra requests and is only wanted for the
         handful of tickers actually being notified — never for the window check.
+        `reported_date` lets the implementation reject a stale figure that predates the
+        quarter being asked about, rather than silently reporting an older one instead.
         """
         ...
 

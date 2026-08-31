@@ -69,15 +69,13 @@ def result_body(
                 f"  da allora     {_pct(price.since_move_pct)}   (→ {_price(price.latest)})"
             )
 
-    if revenue and (revenue.actual is not None or revenue.estimate is not None):
+    if revenue:
         lines += ["", "RICAVI"]
         if revenue.actual is not None:
             lines.append(f"  consuntivo   {_money(revenue.actual)}")
         else:
             # Worth saying out loud: silence here is a source lag, not a missing result.
             lines.append("  consuntivo   non ancora disponibile presso la fonte")
-        if revenue.estimate is not None:
-            lines.append(f"  atteso       {_money(revenue.estimate)}")
 
     if earnings and (table := _recent_quarters(earnings)):
         lines += ["", "ULTIMI TRIMESTRI"] + table

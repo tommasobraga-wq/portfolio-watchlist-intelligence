@@ -23,6 +23,8 @@ FRAME = pd.DataFrame(
     ),
 )
 
+# The report on 2026-07-23 covers the quarter ending 2026-06-30 — a 23-day announcement
+# lag, well inside the normal range.
 INCOME = pd.DataFrame(
     {
         pd.Timestamp("2026-06-30"): [float("nan")],  # lags publication by weeks
@@ -31,10 +33,8 @@ INCOME = pd.DataFrame(
     index=["Total Revenue"],
 )
 
-CALENDAR = {"Earnings Date": [date(2026, 10, 22)], "Revenue Average": 6480867890}
 
-
-def _source(frame=FRAME, income=INCOME, calendar=CALENDAR, error: Exception | None = None):
+def _source(frame=FRAME, income=INCOME, error: Exception | None = None):
     class FakeTicker:
         def __init__(self, symbol: str) -> None:
             self.symbol = symbol
@@ -48,10 +48,6 @@ def _source(frame=FRAME, income=INCOME, calendar=CALENDAR, error: Exception | No
         @property
         def quarterly_income_stmt(self):
             return income
-
-        @property
-        def calendar(self):
-            return calendar
 
     return YahooEarnings(ticker_factory=FakeTicker)
 
@@ -109,10 +105,9 @@ class TestRevenue:
     def test_lagging_actual_is_reported_as_unknown(self) -> None:
         # The newest column is NaN because the income statement trails publication. That
         # must read as "not known yet", never as zero.
-        revenue = _source().revenue("UCG.MI")
+        revenue = _source().revenue("UCG.MI", reported_date=date(2026, 7, 23))
 
         assert revenue.actual is None
-        assert revenue.estimate == Decimal("6480867890")
 
     def test_actual_is_read_once_the_source_fills_it_in(self) -> None:
         filled = pd.DataFrame(
@@ -120,12 +115,38 @@ class TestRevenue:
             index=["Total Revenue"],
         )
 
-        assert _source(income=filled).revenue("UCG.MI").actual == Decimal("6500.0")
+        revenue = _source(income=filled).revenue("UCG.MI", reported_date=date(2026, 7, 23))
+
+        assert revenue.actual == Decimal("6500.0")
+
+    def test_stale_column_is_not_mistaken_for_the_quarter_just_reported(self) -> None:
+        # Confirmed live against NVDA: the statement's newest column can be a whole
+        # quarter behind the one just announced, with a real (non-NaN) figure in it — not
+        # "not filled in yet" but "still on the previous quarter". Showing it would
+        # misreport an older quarter's revenue as this one's actual.
+        stale = pd.DataFrame(
+            {pd.Timestamp("2026-04-30"): [81615.0]},
+            index=["Total Revenue"],
+        )
+
+        revenue = _source(income=stale).revenue("UCG.MI", reported_date=date(2026, 8, 26))
+
+        assert revenue.actual is None
 
     def test_missing_statement_is_not_a_failure(self) -> None:
-        revenue = _source(income=pd.DataFrame(), calendar={}).revenue("UCG.MI")
+        revenue = _source(income=pd.DataFrame()).revenue("UCG.MI")
 
-        assert revenue.actual is None and revenue.estimate is None
+        assert revenue.actual is None
+
+    def test_no_reported_date_skips_the_staleness_check(self) -> None:
+        # Calendar Sync-style callers with no report on hand yet get whatever is there,
+        # same as before this check existed.
+        filled = pd.DataFrame(
+            {pd.Timestamp("2020-01-01"): [1.0]},
+            index=["Total Revenue"],
+        )
+
+        assert _source(income=filled).revenue("UCG.MI").actual == Decimal("1.0")
 
 
 # Shaped after the live probe against UCG.MI: ex-date index, small decimal values.
