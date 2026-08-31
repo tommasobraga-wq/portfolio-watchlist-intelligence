@@ -98,8 +98,10 @@ Known limitations, all measured rather than assumed:
 - **`FBK.MI`, `TIT.MI`, `A2A.MI`** — Yahoo supplies forward dates but stopped publishing
   their actual EPS in 2020–2021. These produce an overdue warning naming the cause instead
   of a result, and need a manual check.
-- **Revenue actuals lag** publication by weeks, so a result mail often carries the estimate
-  and says so explicitly rather than staying silent.
+- **Revenue actuals lag** publication by weeks, so a result mail often says so explicitly
+  ("not yet available") rather than staying silent. There is no revenue estimate shown:
+  Yahoo's only one is consensus for the *next* unreported quarter, not the one just
+  published, so pairing it with the actual would compare two different fiscal periods.
 - **The quarter label** is derived from the announcement date and is a quarter off. It is
   used only as a de-duplication key and never displayed.
 - Yahoo's endpoints are undocumented and can change without notice.

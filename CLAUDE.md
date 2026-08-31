@@ -127,6 +127,16 @@ gap is the event, not either source. Revisit only if a held ticker is one Borsa 
 covers forward; until then it would add a scraper for a benefit nothing in the current watchlist
 would see.
 
+**`yfinance`'s own `Ticker.calendar` also carries `Ex-Dividend Date` / `Dividend Date` fields and
+was checked the same way on 2026-08-31, with the same outcome.** They hold genuine forward dates,
+but only once a board has declared the next distribution — until then the fields just echo the
+last completed cycle, silently, with no flag distinguishing the two. Checked live against every
+held ticker: GOOGL had a genuine forward pair; ACN and SCHW showed already-past dates (nothing
+declared yet); UCG.MI, FBK.MI and RACE.MI (all Milan) had no `Dividend Date` at all — same gap as
+Borsa Italiana, for the same reason: the boards haven't set one, not a source failure. Not adopted
+for the same reason as above — it would help only intermittently for the non-Milan holdings, not
+the Milan side this project cares most about covering.
+
 Constraints to code against:
 - **Sources go behind `EarningsSource` / `PriceSource` / `DividendSource` protocols.** No vendor concept — API keys,
   crumbs, `NaN`, DataFrames — crosses that boundary; `digest.py`, `jobs.py` and the MCP server depend
@@ -136,6 +146,12 @@ Constraints to code against:
   floating-point error. EPS tolerates `float`; prices and positions do not.
 - Yahoo's endpoints are undocumented and can change without notice, so parse defensively and
   treat `SourceUnavailable` as "retry next run", never as "this ticker has no data".
+- **`Ticker.calendar`'s `Revenue Average` is consensus for the *next unreported* quarter, not the
+  one just published — do not pair it with actual revenue as an "estimate".** Confirmed live on
+  2026-08-31 against NVDA: the digest showed an August-quarter actual against a November-quarter
+  estimate. `Revenue` therefore has no `estimate` field; `_revenue_actual` in `yahoo.py` also
+  rejects a stale income-statement column (>75 days before the report date) rather than showing
+  an older quarter's figure as current.
 - A simulated portfolio is a later phase but already binds source choice: it needs daily prices,
   dividends and splits from **one** consistent source, since mixing vendors yields incoherent returns.
 
