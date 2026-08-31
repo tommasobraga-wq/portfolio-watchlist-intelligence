@@ -27,6 +27,17 @@ interesting cases untestable.
 - An unavailable ticker is skipped, never fatal — one throttled lookup must not cost the other
   twenty-six their results.
 
+**A delivery failure is retried silently, but the run must still fail loudly.** A bad Gmail app
+password went unnoticed for four days (2026-08-26 to 2026-08-30, NVDA/MRVL) because every
+scheduled run "succeeded" while every send inside it failed — the retry-on-next-run design
+worked exactly as intended, but nothing ever told the reader delivery itself was broken.
+`RunSummary`/`DividendRunSummary.delivery_failed` counts every caught send exception (results
+digest, due-today notice, overdue batch, dividend notice — all four are the same "detected but
+never reached the reader" event), and `__main__.py` exits non-zero when it is nonzero, which is
+what turns the scheduled workflow run itself red. The state that *did* succeed is still written
+to disk and committed regardless — see `if: always()` on each workflow's "Commit state" step —
+so a partial failure never costs already-delivered mail a duplicate resend next run.
+
 Read [`docs/adr/adr-portfolio-watchlist-earnings-intelligence.md`](docs/adr/adr-portfolio-watchlist-earnings-intelligence.md)
 before proposing structure — it fixes the scope, the data model, and *why* each data source was chosen.
 

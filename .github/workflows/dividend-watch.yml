@@ -54,6 +54,10 @@ jobs:
             ${{ inputs.dry_run && '--dry-run' || '' }}
 
       - name: Commit state
+        # See the same step in results-watch.yml: the Run step now exits non-zero on a
+        # delivery failure, and without `always()` that would skip committing whatever
+        # DID succeed in the same run, causing it to be re-sent next time.
+        if: always()
         run: |
           if git diff --quiet -- data/watchlist.enc; then
             echo "no state change"

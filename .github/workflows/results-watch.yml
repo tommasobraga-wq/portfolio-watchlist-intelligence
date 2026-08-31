@@ -56,6 +56,12 @@ jobs:
             ${{ inputs.dry_run && '--dry-run' || '' }}
 
       - name: Commit state
+        # The Run step now exits non-zero when a delivery failed, so the whole job is
+        # correctly reported as failed — but the tickers that DID succeed were already
+        # saved to disk before that exit, and must still be committed. Without `always()`
+        # this step is skipped on that failure, discarding real state and re-sending
+        # already-delivered mail on the next run.
+        if: always()
         run: |
           if git diff --quiet -- data/watchlist.enc; then
             echo "no state change"

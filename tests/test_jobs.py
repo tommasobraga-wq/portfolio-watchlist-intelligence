@@ -110,6 +110,7 @@ class TestResultsWatch:
         )
 
         assert summary.notified == 0
+        assert summary.delivery_failed == 1
         stored = read(path)["UCG.MI"]
         assert stored.last_notified_period == "2026-Q2"  # unchanged
         assert stored.next_earnings_date == TODAY  # still in window, so it retries
@@ -177,6 +178,34 @@ class TestResultsWatch:
         assert len(mailer.sent) == 1  # grouped, not one per ticker
         assert "2 titoli" in mailer.sent[0][0]
 
+    def test_a_failed_overdue_send_does_not_lose_other_tickers_state(self, store) -> None:
+        # The overdue mail used to be the one send site with no try/except: a failure there
+        # propagated out of results_watch and skipped the persist step entirely, discarding
+        # every other ticker's already-computed state from the same run.
+        path = store(
+            [
+                TrackedTicker("FBK.MI", Label.HELD, date(2026, 10, 15), None),  # goes overdue
+                TrackedTicker("UCG.MI", Label.HELD, TODAY, "2026-Q2"),  # goes notified
+            ]
+        )
+        source = FakeEarningsSource(
+            {"UCG.MI": TickerEarnings("UCG.MI", published=(report(TODAY),))}
+        )
+
+        class FailOnlyOverdue(SpyMailer):
+            def send(self, subject: str, body: str) -> None:
+                if "Risultati attesi e non trovati" in subject:
+                    raise RuntimeError("smtp is down")
+                super().send(subject, body)
+
+        summary = jobs.results_watch(source, FailOnlyOverdue(), path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.overdue == 0  # never confirmed sent
+        assert summary.notified == 1  # unaffected by the other ticker's failure
+        assert summary.delivery_failed == 1
+        # The point of the regression: UCG.MI's successful result still made it to disk.
+        assert read(path)["UCG.MI"].last_notified_period == "2026-Q4"
+
     def test_overdue_mentions_a_prior_due_today_notice(self, store) -> None:
         path = store(
             [
@@ -226,6 +255,7 @@ class TestResultsWatch:
         )
 
         assert summary.due_today == 0
+        assert summary.delivery_failed == 1
         assert read(path)["SPCX"].last_notified_due_date is None
 
     def test_a_real_result_on_the_due_date_is_notified_not_just_flagged_due(self, store) -> None:
@@ -349,6 +379,7 @@ class TestDividendWatch:
         )
 
         assert summary.notified == 0
+        assert summary.delivery_failed == 1
         assert read(path)["UCG.MI"].last_notified_dividend_date is None
 
     def test_one_throttled_ticker_does_not_stop_the_others(self, store) -> None:

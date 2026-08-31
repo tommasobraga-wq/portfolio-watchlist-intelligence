@@ -43,12 +43,16 @@ class RunSummary:
     overdue: int = 0
     unavailable: int = 0
     dates_changed: int = 0
+    # A result was detected and mail was attempted, but delivery itself failed (e.g. a bad
+    # SMTP credential) — distinct from `unavailable`, which is Yahoo throttling and expected
+    # to clear on its own. This is what should make the run fail loudly: see `__main__`.
+    delivery_failed: int = 0
 
     def __str__(self) -> str:
         return (
             f"lookups={self.looked_up} notified={self.notified} adopted={self.adopted} "
             f"due_today={self.due_today} overdue={self.overdue} unavailable={self.unavailable} "
-            f"dates_changed={self.dates_changed}"
+            f"dates_changed={self.dates_changed} delivery_failed={self.delivery_failed}"
         )
 
 
@@ -145,6 +149,8 @@ def results_watch(
             if _announce(mailer, decision, labels[ticker.symbol], earnings, source, prices, today):
                 _apply(tickers, ticker, decision)
                 summary.notified += 1
+            else:
+                summary.delivery_failed += 1
         elif decision.outcome is digest.Outcome.ADOPTED:
             # No mail to fail, so the stamp is safe to write immediately.
             _apply(tickers, ticker, decision)
@@ -159,6 +165,7 @@ def results_watch(
             except Exception:
                 # Deliberately not stamping: retried next run, same as a failed NOTIFY.
                 log.exception("%s: due-today notice failed, will retry next run", ticker.symbol)
+                summary.delivery_failed += 1
             else:
                 _apply(tickers, ticker, decision)
                 summary.due_today += 1
@@ -167,12 +174,22 @@ def results_watch(
             overdue.append(decision)
 
     if overdue:
-        summary.overdue = len(overdue)
-        mailer.send(
-            render.overdue_subject(overdue),
-            render.overdue_body(overdue, labels, today=today),
-        )
-        log.info("overdue reported for %s", ", ".join(d.symbol for d in overdue))
+        try:
+            mailer.send(
+                render.overdue_subject(overdue),
+                render.overdue_body(overdue, labels, today=today),
+            )
+        except Exception:
+            # Same contract as NOTIFY/DUE_TODAY: never let a delivery failure here abort
+            # the run and lose every other ticker's already-computed state below.
+            log.exception(
+                "overdue notice failed for %s, will retry next run",
+                ", ".join(d.symbol for d in overdue),
+            )
+            summary.delivery_failed += 1
+        else:
+            summary.overdue = len(overdue)
+            log.info("overdue reported for %s", ", ".join(d.symbol for d in overdue))
 
     if persist:
         watchlist.save(tickers, path, key=key)
@@ -240,11 +257,13 @@ class DividendRunSummary:
     notified: int = 0
     adopted: int = 0
     unavailable: int = 0
+    delivery_failed: int = 0
 
     def __str__(self) -> str:
         return (
             f"lookups={self.looked_up} notified={self.notified} "
-            f"adopted={self.adopted} unavailable={self.unavailable}"
+            f"adopted={self.adopted} unavailable={self.unavailable} "
+            f"delivery_failed={self.delivery_failed}"
         )
 
 
@@ -294,6 +313,7 @@ def dividend_watch(
                 log.exception(
                     "%s: dividend delivery failed, leaving it unnotified for retry", ticker.symbol
                 )
+                summary.delivery_failed += 1
                 continue
             _apply_dividend(tickers, ticker, decision)
             summary.notified += 1
