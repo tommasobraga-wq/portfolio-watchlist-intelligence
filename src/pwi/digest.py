@@ -124,7 +124,7 @@ def classify(ticker: TrackedTicker, report: EarningsReport | None, today: date) 
     """Decide what to do about one ticker, given whatever the source returned for it."""
     expected = ticker.next_earnings_date
 
-    if report is None or report.period == ticker.last_notified_period:
+    if report is None or report.period == ticker.last_notified_period or _is_stale(ticker, report):
         # Nothing published, or the newest published quarter is one we already sent. Either
         # way there is no news — but if the expected date has come and gone, the absence is
         # itself worth reporting rather than sitting silent (see FBK.MI in the ADR).
@@ -143,13 +143,33 @@ def classify(ticker: TrackedTicker, report: EarningsReport | None, today: date) 
     return Decision(ticker.symbol, Outcome.NOTIFY, report=report)
 
 
+def _is_stale(ticker: TrackedTicker, report: EarningsReport | None) -> bool:
+    """A report that is not later than the one we already notified.
+
+    Yahoo's `earnings_dates` has been observed to intermittently serve a spurious row for a
+    date on which the company plainly did not report (DELL, 2026-09-01, a US market
+    holiday), which flip-flopped `report.period` between quarters run to run and re-fired a
+    notification each time a run's snapshot happened to differ from the last one written.
+    A period-string mismatch alone is not evidence of real news; the announcement date must
+    also have moved forward.
+    """
+    return (
+        report is not None
+        and report.reported_date is not None
+        and ticker.last_notified_date is not None
+        and report.reported_date <= ticker.last_notified_date
+    )
+
+
 def _silence(
     ticker: TrackedTicker,
     report: EarningsReport | None,
     today: date,
     expected: date | None,
 ) -> Decision:
-    already = report is not None and report.period == ticker.last_notified_period
+    already = report is not None and (
+        report.period == ticker.last_notified_period or _is_stale(ticker, report)
+    )
 
     if expected is not None:
         days_late = (today - expected).days

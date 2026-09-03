@@ -121,6 +121,45 @@ class TestDeduplication:
         assert updated.last_notified_date == TODAY
 
 
+class TestStaleReport:
+    def test_an_older_report_is_not_renotified_even_with_a_different_period(self) -> None:
+        # DELL, 2026-09: Yahoo served a spurious "01/09/2026" row (a US market holiday, so
+        # plainly not a real report), then reverted to the genuine 28/05/2026 quarter on the
+        # next run. Different `period` strings, but the second is not news over the first.
+        already_notified = ticker(next_date=None, notified="2026-Q3", notified_on=date(2026, 9, 1))
+        older_report = report(reported_on=date(2026, 5, 28))
+
+        decision = classify(already_notified, older_report, TODAY)
+
+        assert decision.outcome is Outcome.ALREADY_NOTIFIED
+
+    def test_an_older_report_does_not_overwrite_the_newer_stamp(self) -> None:
+        already_notified = ticker(next_date=None, notified="2026-Q3", notified_on=date(2026, 9, 1))
+        older_report = report(reported_on=date(2026, 5, 28))
+
+        decision = classify(already_notified, older_report, TODAY)
+        updated = apply(already_notified, decision)
+
+        assert updated.last_notified_date == date(2026, 9, 1)
+        assert updated.last_notified_period == "2026-Q3"
+
+    def test_the_same_date_is_also_stale(self) -> None:
+        already_notified = ticker(next_date=None, notified="2026-Q2", notified_on=TODAY)
+        same_date_different_period = report(reported_on=TODAY)
+
+        decision = classify(already_notified, same_date_different_period, TODAY)
+
+        assert decision.outcome is Outcome.ALREADY_NOTIFIED
+
+    def test_a_genuinely_later_report_still_notifies(self) -> None:
+        already_notified = ticker(notified="2026-Q2", notified_on=date(2026, 7, 23))
+        later_report = report(reported_on=TODAY)
+
+        decision = classify(already_notified, later_report, TODAY)
+
+        assert decision.outcome is Outcome.NOTIFY
+
+
 class TestSilence:
     def test_before_the_date_silence_is_normal(self) -> None:
         decision = classify(ticker(next_date=date(2026, 10, 23)), None, TODAY)
