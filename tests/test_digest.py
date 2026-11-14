@@ -7,6 +7,8 @@ import pytest
 
 from pwi.digest import (
     DIVIDEND_FRESH_DAYS,
+    OVERDUE_AFTER_DAYS,
+    WINDOW_CLOSES_DAYS_AFTER,
     DividendOutcome,
     Outcome,
     apply,
@@ -15,6 +17,7 @@ from pwi.digest import (
     classify_dividend,
     is_in_window,
     is_source_stale,
+    next_expected,
     reaction,
     to_report,
 )
@@ -28,6 +31,7 @@ def ticker(
     notified: str | None = None,
     due_notified: date | None = None,
     notified_on: date | None = None,
+    overdue_notified: date | None = None,
 ) -> TrackedTicker:
     return TrackedTicker(
         "UCG.MI",
@@ -35,6 +39,7 @@ def ticker(
         next_date,
         notified,
         last_notified_due_date=due_notified,
+        last_notified_overdue_date=overdue_notified,
         last_notified_date=notified_on,
     )
 
@@ -257,6 +262,144 @@ class TestDueToday:
 
         assert decision.outcome is Outcome.OVERDUE
         assert decision.heads_up_already_sent is False
+
+
+class TestOverdueIsNotRepeated:
+    """The overdue notice was the one notice type with no de-dup key.
+
+    Nothing in the overdue decision changes between runs — the report is absent either way,
+    and the expected date stays put — so without a stamp the identical mail went out on
+    every run of the window: 8 days x 8 runs a day at the current cadence. Every other
+    notice type has been guarded since it was written; this one was simply forgotten.
+    """
+
+    LATE = date(2026, 10, 19)  # three days before TODAY
+
+    def test_the_first_run_still_alerts(self) -> None:
+        decision = classify(ticker(next_date=self.LATE), None, TODAY)
+
+        assert decision.outcome is Outcome.OVERDUE
+
+    def test_apply_stamps_the_expected_date(self) -> None:
+        original = ticker(next_date=self.LATE)
+        updated = apply(original, classify(original, None, TODAY))
+
+        assert updated.last_notified_overdue_date == self.LATE
+
+    def test_apply_leaves_the_window_open(self) -> None:
+        # Same contract as DUE_TODAY: the ticker must stay in-window so a result published
+        # later in the window is still picked up and announced properly.
+        original = ticker(next_date=self.LATE, notified="2026-Q2")
+        updated = apply(original, classify(original, None, TODAY))
+
+        assert updated.next_earnings_date == self.LATE
+        assert updated.last_notified_period == "2026-Q2"
+
+    def test_apply_preserves_every_other_stamp(self) -> None:
+        original = ticker(next_date=self.LATE, notified_on=date(2026, 7, 23))
+        original.last_notified_dividend_date = date(2026, 4, 20)
+        updated = apply(original, classify(original, None, TODAY))
+
+        assert updated.last_notified_date == date(2026, 7, 23)
+        assert updated.last_notified_dividend_date == date(2026, 4, 20)
+
+    def test_the_second_run_stays_silent(self) -> None:
+        decision = classify(ticker(next_date=self.LATE, overdue_notified=self.LATE), None, TODAY)
+
+        assert decision.outcome is Outcome.NOT_YET_PUBLISHED
+
+    @pytest.mark.parametrize("days_later", [1, 4, 8])
+    def test_it_stays_silent_for_the_rest_of_the_window(self, days_later: int) -> None:
+        decision = classify(
+            ticker(next_date=self.LATE, overdue_notified=self.LATE),
+            None,
+            TODAY + timedelta(days=days_later),
+        )
+
+        assert decision.outcome is not Outcome.OVERDUE
+
+    def test_a_stamp_a_day_off_still_counts_as_this_cycle(self) -> None:
+        # Calendar Sync nudges the expected date as the source refines it, and exact date
+        # equality would read the shift as a new cycle and re-send the same alert.
+        decision = classify(
+            ticker(next_date=self.LATE, overdue_notified=self.LATE - timedelta(days=1)),
+            None,
+            TODAY,
+        )
+
+        assert decision.outcome is not Outcome.OVERDUE
+
+    def test_the_next_quarter_alerts_again(self) -> None:
+        # A real new cycle, a quarter later, is far outside the same-cycle tolerance.
+        expected = self.LATE + timedelta(days=91)
+        decision = classify(
+            ticker(next_date=expected, overdue_notified=self.LATE),
+            None,
+            expected + timedelta(days=OVERDUE_AFTER_DAYS),
+        )
+
+        assert decision.outcome is Outcome.OVERDUE
+
+    def test_notify_clears_the_overdue_stamp(self) -> None:
+        original = ticker(next_date=self.LATE, notified="2026-Q2", overdue_notified=self.LATE)
+        updated = apply(original, classify(original, report(), TODAY))
+
+        assert updated.last_notified_overdue_date is None
+
+    def test_a_result_arriving_after_the_alert_still_notifies(self) -> None:
+        # The whole point of leaving the window open: the alert is a heads-up, not a verdict.
+        decision = classify(
+            ticker(next_date=self.LATE, notified="2026-Q2", overdue_notified=self.LATE),
+            report(),
+            TODAY,
+        )
+
+        assert decision.outcome is Outcome.NOTIFY
+
+    def test_a_day_zero_stamp_a_day_off_does_not_refire_the_heads_up(self) -> None:
+        decision = classify(
+            ticker(next_date=TODAY, due_notified=TODAY - timedelta(days=1)), None, TODAY
+        )
+
+        assert decision.outcome is Outcome.NOT_YET_PUBLISHED
+
+
+class TestNextExpected:
+    """Which of the source's scheduled dates is still a forward-looking expectation.
+
+    Yahoo lists rows it never fills in, and taking the earliest unconditionally made a
+    ticker permanently overdue: the weekly sync kept restoring the same past date, so the
+    8-day streak never ended.
+    """
+
+    def test_a_forward_date_is_kept(self) -> None:
+        assert next_expected((date(2026, 11, 5),), TODAY) == date(2026, 11, 5)
+
+    def test_the_nearest_forward_date_wins(self) -> None:
+        scheduled = (date(2026, 11, 5), date(2027, 2, 4))
+
+        assert next_expected(scheduled, TODAY) == date(2026, 11, 5)
+
+    def test_a_date_still_inside_its_window_is_kept(self) -> None:
+        # A company genuinely late must stay overdue-able; only an abandoned row is dropped.
+        late = TODAY - timedelta(days=OVERDUE_AFTER_DAYS)
+
+        assert next_expected((late,), TODAY) == late
+
+    def test_a_date_past_its_window_is_dropped(self) -> None:
+        stale = TODAY - timedelta(days=WINDOW_CLOSES_DAYS_AFTER + 1)
+
+        assert next_expected((stale,), TODAY) is None
+
+    def test_an_abandoned_row_does_not_hide_a_real_one(self) -> None:
+        # The regression: `min()` picked the abandoned row and the real date was lost.
+        stale = date(2024, 5, 2)
+        real = date(2026, 11, 5)
+
+        assert next_expected((stale, real), TODAY) == real
+
+    def test_nothing_scheduled_means_no_date(self) -> None:
+        assert next_expected((), TODAY) is None
 
 
 class TestSourceWithAStaleHistory:
@@ -504,6 +647,21 @@ class TestApplyDividend:
 
         assert updated.next_earnings_date == TODAY
         assert updated.last_notified_period == "2026-Q3"
+
+    def test_applying_a_dividend_decision_does_not_wipe_the_pending_stamps(self) -> None:
+        # The bug this pins down: `apply_dividend` re-listed the fields it carried over and
+        # omitted these three, resetting them to the dataclass default. Wiping
+        # `last_notified_date` disabled `_is_stale` for the ticker, re-opening the
+        # duplicate-notification path that guard exists to close.
+        t = ticker(notified="2026-Q3", due_notified=TODAY, notified_on=date(2026, 7, 23))
+        t.last_notified_overdue_date = date(2026, 7, 26)
+        decision = classify_dividend(t, (dividend(TODAY),), TODAY)
+
+        updated = apply_dividend(t, decision)
+
+        assert updated.last_notified_due_date == TODAY
+        assert updated.last_notified_overdue_date == date(2026, 7, 26)
+        assert updated.last_notified_date == date(2026, 7, 23)
 
     def test_applying_an_earnings_decision_never_touches_dividend_state(self) -> None:
         dividend_notified = TODAY - timedelta(days=30)

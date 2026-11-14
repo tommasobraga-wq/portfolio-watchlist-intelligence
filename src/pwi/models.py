@@ -30,6 +30,11 @@ class TrackedTicker:
     # The `next_earnings_date` for which a day-0 "expected today, no data yet" notice was
     # already sent, guarding against resending it on every run within the same day.
     last_notified_due_date: date | None = None
+    # The `next_earnings_date` whose overdue alert has already been sent, guarding against
+    # resending the same "expected and not found" notice on every run of the window. Without
+    # it the overdue notice is the one notice type with no de-dup key at all, and repeats on
+    # every run for as long as the expected date stays past and unanswered.
+    last_notified_overdue_date: date | None = None
     # Display-only companion to `last_notified_period`: the actual announcement date of the
     # last notified report. `period` is a stable de-dup key, not meant to be read by a human
     # (see its docstring) — this is what a human-facing view like `watchlist_tool.py show`
@@ -106,13 +111,27 @@ class TickerEarnings:
     """
 
     symbol: str
-    next_date: date | None = None
+    # Dates the source lists as upcoming, oldest first. Kept whole rather than reduced to a
+    # single "next" date because the source lists rows it never fills in: deciding which of
+    # these is still a forward-looking expectation needs today's date, and that decision
+    # belongs in `digest`, not here — see `digest.next_expected`.
+    scheduled: tuple[date, ...] = ()
     # Published quarters, newest first. Scheduled-but-unreported ones are excluded.
     published: tuple[EarningsReport, ...] = ()
 
     @property
     def latest(self) -> EarningsReport | None:
         return self.published[0] if self.published else None
+
+    @property
+    def next_date(self) -> date | None:
+        """The earliest scheduled date, whether or not it is still in the future.
+
+        Once a company reports, later quarters are already listed and the nearest one is
+        what a reporting window cares about. Callers that persist this must filter it
+        through `digest.next_expected` first.
+        """
+        return min(self.scheduled) if self.scheduled else None
 
     def year_before(self, report: EarningsReport) -> EarningsReport | None:
         """The comparable quarter a year earlier, for a like-for-like comparison.

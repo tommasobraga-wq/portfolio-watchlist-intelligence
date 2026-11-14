@@ -15,6 +15,8 @@ def test_round_trip(tmp_path: Path) -> None:
             date(2026, 2, 10),
             "2025-Q4",
             date(2026, 4, 20),
+            last_notified_due_date=date(2026, 2, 10),
+            last_notified_overdue_date=date(2026, 2, 10),
             last_notified_date=date(2026, 1, 22),
         ),
         TrackedTicker("RACE.MI", Label.WATCHING),
@@ -68,3 +70,28 @@ def test_a_row_written_before_the_notified_date_field_existed_still_loads(tmp_pa
     loaded = load(path)
 
     assert loaded[0].last_notified_date is None
+
+
+def test_a_row_written_before_the_overdue_field_existed_still_loads(tmp_path: Path) -> None:
+    # Every live row in data/watchlist.enc predates last_notified_overdue_date, so the very
+    # first load after this field was added hits this path for all 26 of them.
+    path = tmp_path / "watchlist.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "symbol": "FBK.MI",
+                    "label": "held",
+                    "next_earnings_date": "2026-11-05",
+                    "last_notified_period": "2021-Q4",
+                    "last_notified_due_date": None,
+                    "last_notified_date": "2021-11-09",
+                }
+            ]
+        )
+    )
+
+    loaded = load(path)
+
+    assert loaded[0].last_notified_overdue_date is None
+    assert loaded[0].last_notified_date == date(2021, 11, 9)

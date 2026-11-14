@@ -97,7 +97,23 @@ triggers, and the ADR treats keeping them separate as a decision, not an acciden
    tickers are skipped — they pay nothing to the reader, so a distribution on one is not actionable.
 
 Tracked-ticker record, minimum fields: `symbol`, `label` (`held` | `watching`, static and manually
-maintained), `next_earnings_date`, `last_notified_period`, `last_notified_dividend_date`.
+maintained), `next_earnings_date`, `last_notified_period`, `last_notified_dividend_date`,
+`last_notified_due_date`, `last_notified_overdue_date`, `last_notified_date`.
+
+**Every notification type owns a suppression stamp, and the rule is one mail per reporting cycle
+per ticker.** The two *absence* notices — the day-0 "expected today" heads-up and the "expected
+and not found" overdue alert — are the ones that need this stated, because their decision inputs
+do not change between runs: nothing published is still nothing published next run. The overdue
+alert shipped without a stamp and re-sent the identical mail eight times a day for eight days.
+Stamps are matched **per cycle** (`digest._same_cycle`), not by exact date equality, because
+Calendar Sync nudges `next_earnings_date` by a day or two and exact equality reads the shift as a
+new cycle. Both absence stamps deliberately leave `next_earnings_date` and `last_notified_period`
+alone, so the ticker stays in-window and a result arriving later is still announced in full.
+
+`digest.apply` / `apply_dividend` build the updated record with `dataclasses.replace`, never by
+re-listing fields. Re-listing is how `last_notified_date` came to be silently dropped on the
+dividend path, which disabled the stale-report guard that depends on it. Adding a field to
+`TrackedTicker` must not require remembering to carry it in four places.
 
 ## Data sources — do not substitute them
 

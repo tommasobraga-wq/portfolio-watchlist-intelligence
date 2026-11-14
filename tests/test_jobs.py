@@ -1,6 +1,6 @@
 """Orchestration tests. No network, no SMTP, no clock — everything injected."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -178,6 +178,78 @@ class TestResultsWatch:
         assert len(mailer.sent) == 1  # grouped, not one per ticker
         assert "2 titoli" in mailer.sent[0][0]
 
+    def test_the_overdue_mail_is_stamped_and_not_repeated(self, store) -> None:
+        # The reported bug: the overdue notice was the one notice type with no de-dup key,
+        # so the identical mail went out on every run — eight a day, for the eight days the
+        # window stays open past the expected date.
+        path = store([TrackedTicker("FBK.MI", Label.HELD, date(2026, 10, 15), None)])
+        mailer = SpyMailer()
+
+        first = jobs.results_watch(
+            FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+        assert first.overdue == 1
+        assert read(path)["FBK.MI"].last_notified_overdue_date == date(2026, 10, 15)
+
+        second = jobs.results_watch(
+            FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert second.overdue == 0
+        assert len(mailer.sent) == 1
+
+    def test_the_overdue_mail_stays_quiet_for_the_rest_of_the_window(self, store) -> None:
+        path = store([TrackedTicker("FBK.MI", Label.HELD, date(2026, 10, 15), None)])
+        mailer = SpyMailer()
+
+        for offset in range(0, 8):
+            jobs.results_watch(
+                FakeEarningsSource(),
+                mailer,
+                path,
+                key=KEY,
+                today=TODAY + timedelta(days=offset),
+                delay=0,
+            )
+
+        assert len(mailer.sent) == 1
+
+    def test_the_overdue_stamp_leaves_a_later_result_announceable(self, store) -> None:
+        # The stamp must suppress the alert, not the result: the window stays open.
+        path = store([TrackedTicker("FBK.MI", Label.HELD, date(2026, 10, 15), "2026-Q3")])
+        mailer = SpyMailer()
+
+        jobs.results_watch(FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0)
+        published = FakeEarningsSource(
+            {"FBK.MI": TickerEarnings("FBK.MI", published=(report(TODAY),))}
+        )
+        summary = jobs.results_watch(published, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.notified == 1
+        assert len(mailer.sent) == 2
+        assert read(path)["FBK.MI"].last_notified_overdue_date is None
+
+    def test_a_failed_overdue_send_is_retried_next_run(self, store) -> None:
+        # Same contract as a failed NOTIFY or DUE_TODAY: nothing is stamped, so the whole
+        # batch comes back on the next run rather than being silently dropped.
+        path = store([TrackedTicker("FBK.MI", Label.HELD, date(2026, 10, 15), None)])
+
+        failed = jobs.results_watch(
+            FakeEarningsSource(), SpyMailer(fail=True), path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert failed.overdue == 0
+        assert failed.delivery_failed == 1
+        assert read(path)["FBK.MI"].last_notified_overdue_date is None
+
+        mailer = SpyMailer()
+        retried = jobs.results_watch(
+            FakeEarningsSource(), mailer, path, key=KEY, today=TODAY, delay=0
+        )
+
+        assert retried.overdue == 1
+        assert len(mailer.sent) == 1
+
     def test_a_failed_overdue_send_does_not_lose_other_tickers_state(self, store) -> None:
         # The overdue mail used to be the one send site with no try/except: a failure there
         # propagated out of results_watch and skipped the persist step entirely, discarding
@@ -287,9 +359,9 @@ class TestResultsWatch:
 class TestCalendarSync:
     def test_expected_dates_are_refreshed(self, store) -> None:
         path = store([TrackedTicker("UCG.MI", Label.HELD, date(2026, 10, 1))])
-        source = FakeEarningsSource({"UCG.MI": TickerEarnings("UCG.MI", next_date=TODAY)})
+        source = FakeEarningsSource({"UCG.MI": TickerEarnings("UCG.MI", scheduled=(TODAY,))})
 
-        summary = jobs.calendar_sync(source, path, key=KEY, delay=0)
+        summary = jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
 
         assert summary.dates_changed == 1
         assert read(path)["UCG.MI"].next_earnings_date == TODAY
@@ -297,9 +369,9 @@ class TestCalendarSync:
     def test_it_rearms_a_ticker_after_a_notification(self, store) -> None:
         # results_watch clears the date; calendar_sync is what puts the next one back.
         path = store([TrackedTicker("UCG.MI", Label.HELD, None, "2026-Q3")])
-        source = FakeEarningsSource({"UCG.MI": TickerEarnings("UCG.MI", next_date=TODAY)})
+        source = FakeEarningsSource({"UCG.MI": TickerEarnings("UCG.MI", scheduled=(TODAY,))})
 
-        jobs.calendar_sync(source, path, key=KEY, delay=0)
+        jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
 
         assert read(path)["UCG.MI"].next_earnings_date == TODAY
 
@@ -307,15 +379,27 @@ class TestCalendarSync:
         path = store([TrackedTicker("UCG.MI", Label.HELD, TODAY)])
         source = FakeEarningsSource(unavailable={"UCG.MI"})
 
-        summary = jobs.calendar_sync(source, path, key=KEY, delay=0)
+        summary = jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
 
         assert summary.unavailable == 1
         assert read(path)["UCG.MI"].next_earnings_date == TODAY
 
+    def test_an_abandoned_scheduled_row_is_not_written_back(self, store) -> None:
+        # Yahoo keeps listing rows it never fills in. Persisting one as the expected date
+        # left the ticker overdue on every run, and the weekly sync kept restoring it, so
+        # the alert never stopped. None is honest: queried, but with no window.
+        path = store([TrackedTicker("TIT.MI", Label.WATCHING, date(2026, 10, 1))])
+        abandoned = date(2026, 6, 4)
+        source = FakeEarningsSource({"TIT.MI": TickerEarnings("TIT.MI", scheduled=(abandoned,))})
+
+        jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
+
+        assert read(path)["TIT.MI"].next_earnings_date is None
+
     def test_instruments_without_earnings_are_left_dateless(self, store) -> None:
         path = store([TrackedTicker("GOAI-EUR.MI", Label.HELD, None)])
 
-        jobs.calendar_sync(FakeEarningsSource(), path, key=KEY, delay=0)
+        jobs.calendar_sync(FakeEarningsSource(), path, key=KEY, today=TODAY, delay=0)
 
         assert read(path)["GOAI-EUR.MI"].next_earnings_date is None
 
