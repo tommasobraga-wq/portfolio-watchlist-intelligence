@@ -384,6 +384,65 @@ class TestCalendarSync:
         assert summary.unavailable == 1
         assert read(path)["UCG.MI"].next_earnings_date == TODAY
 
+    def test_it_does_not_advance_past_an_unnotified_result(self, store) -> None:
+        # PRY.MI, 2026-10-29: the company reported, the source filled the actual EPS in
+        # later, and this step moved the expected date to the next quarter before Results
+        # Watch ever saw it. That shut the window on a result nobody was told about, with
+        # the next look due four months out.
+        path = store([TrackedTicker("PRY.MI", Label.WATCHING, date(2026, 10, 29), "2026-Q3")])
+        source = FakeEarningsSource(
+            {
+                "PRY.MI": TickerEarnings(
+                    "PRY.MI",
+                    scheduled=(date(2027, 2, 25),),
+                    published=(report(date(2026, 10, 29)),),
+                )
+            }
+        )
+
+        jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
+
+        # None, not the old date: the window would close on it anyway. This keeps the ticker
+        # on the always-checked path until the result has actually been announced.
+        assert read(path)["PRY.MI"].next_earnings_date is None
+
+    def test_the_held_open_ticker_is_then_notified(self, store) -> None:
+        path = store([TrackedTicker("PRY.MI", Label.WATCHING, date(2026, 10, 29), "2026-Q3")])
+        source = FakeEarningsSource(
+            {
+                "PRY.MI": TickerEarnings(
+                    "PRY.MI",
+                    scheduled=(date(2027, 2, 25),),
+                    published=(report(date(2026, 10, 29)),),
+                )
+            }
+        )
+        mailer = SpyMailer()
+
+        jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
+        summary = jobs.results_watch(source, mailer, path, key=KEY, today=TODAY, delay=0)
+
+        assert summary.notified == 1
+        assert "PRY.MI" in mailer.sent[0][0]
+        assert read(path)["PRY.MI"].last_notified_period == "2026-Q4"
+
+    def test_a_fully_notified_ticker_still_advances(self, store) -> None:
+        # The guard must not freeze a ticker that owes nothing: this is the normal path.
+        path = store([TrackedTicker("PRY.MI", Label.WATCHING, date(2026, 10, 29), "2026-Q4")])
+        source = FakeEarningsSource(
+            {
+                "PRY.MI": TickerEarnings(
+                    "PRY.MI",
+                    scheduled=(date(2027, 2, 25),),
+                    published=(report(date(2026, 10, 29)),),
+                )
+            }
+        )
+
+        jobs.calendar_sync(source, path, key=KEY, today=TODAY, delay=0)
+
+        assert read(path)["PRY.MI"].next_earnings_date == date(2027, 2, 25)
+
     def test_an_abandoned_scheduled_row_is_not_written_back(self, store) -> None:
         # Yahoo keeps listing rows it never fills in. Persisting one as the expected date
         # left the ticker overdue on every run, and the weekly sync kept restoring it, so
