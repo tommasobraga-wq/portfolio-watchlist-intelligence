@@ -91,6 +91,23 @@ def calendar_sync(
 
         summary.looked_up += 1
         expected = digest.next_expected(earnings.scheduled, today)
+        # A forward date would close the reporting window on a result nobody has seen yet.
+        # The source fills in an actual EPS at its own pace, and the moment
+        # `next_earnings_date` points at the next quarter the ticker is out of window and
+        # never queried for the old one again — the result is abandoned silently, which is
+        # worse than a duplicate. PRY.MI, 2026-10-29: reported, never announced, window shut
+        # by this very step on 2026-11-01 and the next look due 2027-02-23.
+        #
+        # `None` is the right value, not the old date: it puts the ticker on the
+        # always-checked path until Results Watch has notified it, and notifying clears the
+        # date anyway, so the next sync re-arms the real one. No new state is needed.
+        if expected is not None and _owes_a_notification(ticker, earnings, today):
+            log.info(
+                "%s: holding the date open, %s is published but unnotified",
+                ticker.symbol,
+                earnings.latest.period,
+            )
+            expected = None
         if expected != ticker.next_earnings_date:
             log.info(
                 "%s: expected date %s -> %s",
@@ -107,6 +124,11 @@ def calendar_sync(
         log.info("dry run: state not written")
     log.info("calendar sync: %s", summary)
     return summary
+
+
+def _owes_a_notification(ticker: TrackedTicker, earnings, today: date) -> bool:
+    """Whether the source already holds a result this ticker still owes the reader."""
+    return digest.classify(ticker, earnings.latest, today).outcome is digest.Outcome.NOTIFY
 
 
 def results_watch(
