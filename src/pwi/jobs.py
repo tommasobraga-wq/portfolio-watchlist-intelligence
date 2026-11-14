@@ -64,6 +64,7 @@ def calendar_sync(
     source: EarningsSource,
     path: Path = watchlist.DEFAULT_PATH,
     key: str | None = None,
+    today: date | None = None,
     delay: float = DELAY_BETWEEN_LOOKUPS,
     persist: bool = True,
 ) -> RunSummary:
@@ -71,7 +72,12 @@ def calendar_sync(
 
     Runs weekly over the whole watchlist. Expected dates move often, and this is also what
     re-arms a ticker after its result was notified and the date cleared.
+
+    What the source offers is filtered through `digest.next_expected` rather than written
+    through: a scheduled row Yahoo never fills in would otherwise be restored as a past
+    expected date on every run, leaving the ticker permanently overdue.
     """
+    today = today or today_utc()
     tickers = watchlist.load(path, key=key)
     summary = RunSummary()
 
@@ -84,14 +90,15 @@ def calendar_sync(
             continue
 
         summary.looked_up += 1
-        if earnings.next_date != ticker.next_earnings_date:
+        expected = digest.next_expected(earnings.scheduled, today)
+        if expected != ticker.next_earnings_date:
             log.info(
                 "%s: expected date %s -> %s",
                 ticker.symbol,
                 ticker.next_earnings_date,
-                earnings.next_date,
+                expected,
             )
-            ticker.next_earnings_date = earnings.next_date
+            ticker.next_earnings_date = expected
             summary.dates_changed += 1
 
     if persist:
@@ -124,7 +131,9 @@ def results_watch(
     today = today or today_utc()
     tickers = watchlist.load(path, key=key)
     summary = RunSummary()
-    overdue: list[digest.Decision] = []
+    # Paired with its ticker, because the batch mail is what gates the state write and the
+    # stamp has to be applied to the record the decision was made from.
+    overdue: list[tuple[TrackedTicker, digest.Decision]] = []
     labels = render.labels_of(tickers)
 
     due = [
@@ -171,25 +180,31 @@ def results_watch(
                 summary.due_today += 1
                 log.info("%s: due-today notice sent", ticker.symbol)
         elif decision.outcome is digest.Outcome.OVERDUE:
-            overdue.append(decision)
+            overdue.append((ticker, decision))
 
     if overdue:
+        decisions = [d for _, d in overdue]
         try:
             mailer.send(
-                render.overdue_subject(overdue),
-                render.overdue_body(overdue, labels, today=today),
+                render.overdue_subject(decisions),
+                render.overdue_body(decisions, labels, today=today),
             )
         except Exception:
             # Same contract as NOTIFY/DUE_TODAY: never let a delivery failure here abort
-            # the run and lose every other ticker's already-computed state below.
+            # the run and lose every other ticker's already-computed state below. Nothing
+            # is stamped, so the whole batch is retried on the next run.
             log.exception(
                 "overdue notice failed for %s, will retry next run",
-                ", ".join(d.symbol for d in overdue),
+                ", ".join(d.symbol for d in decisions),
             )
             summary.delivery_failed += 1
         else:
+            # Stamped only now, after delivery, so each ticker is reported once per cycle
+            # rather than on every run of its window.
+            for ticker, decision in overdue:
+                _apply(tickers, ticker, decision)
             summary.overdue = len(overdue)
-            log.info("overdue reported for %s", ", ".join(d.symbol for d in overdue))
+            log.info("overdue reported for %s", ", ".join(d.symbol for d in decisions))
 
     if persist:
         watchlist.save(tickers, path, key=key)

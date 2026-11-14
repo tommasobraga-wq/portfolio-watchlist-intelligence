@@ -74,9 +74,12 @@ class YahooEarnings:
             )
 
         published.sort(key=lambda r: r.reported_date or date.min, reverse=True)
-        # The earliest scheduled date, not the furthest: once a company reports, later
-        # quarters are already listed and the nearest one is what the window cares about.
-        return TickerEarnings(symbol, min(scheduled) if scheduled else None, tuple(published))
+        # Every scheduled date, not just the earliest: Yahoo lists rows it never fills in,
+        # so picking one here would mean choosing between an abandoned past row and a real
+        # forward one without a clock. That choice is `digest.next_expected`'s.
+        return TickerEarnings(
+            symbol, scheduled=tuple(sorted(scheduled)), published=tuple(published)
+        )
 
     def revenue(self, symbol: str, reported_date: date | None = None) -> Revenue:
         return Revenue(actual=self._revenue_actual(symbol, reported_date))

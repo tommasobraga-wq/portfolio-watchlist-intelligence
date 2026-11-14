@@ -57,6 +57,41 @@ A tracked-ticker record with, at minimum:
 - `label`: `held` | `watching` — static, manually managed, updated by hand when a position is opened/closed
 - `next_earnings_date`
 - `last_notified_period` — guards against duplicate notifications for the same quarter
+- `last_notified_dividend_date` — the same guard for the dividend axis (ex-date, the only date exposed consistently across every exchange this watchlist covers)
+- `last_notified_due_date` — the same guard for the day-0 "expected today" heads-up
+- `last_notified_overdue_date` — the same guard for the "expected and not found" alert
+- `last_notified_date` — display-only companion to `last_notified_period`
+
+#### Every notification is suppressed by a stamp, one per reporting cycle
+
+Two notices were added after this ADR was first written and are recorded here now: a **day-0
+heads-up** on the expected date when nothing has been published yet, and an **overdue alert**
+once the expected date is `OVERDUE_AFTER_DAYS` past with still nothing for that cycle (the
+FBK.MI case: the source supplies forward dates but stopped publishing the actuals years ago,
+and silence there is indistinguishable from working correctly).
+
+Both are *absence* notices, and that makes them structurally different from a results digest:
+their decision inputs do not change between runs. A digest stops repeating on its own, because
+the thing that triggered it gets stamped. An absence notice has nothing to stamp unless a key
+is kept for it deliberately — so **each notice type owns a suppression key, and the rule is one
+mail per reporting cycle per ticker**, not one per run.
+
+This was learned the expensive way: the overdue alert shipped without a key and re-sent the
+identical mail on every run — eight a day for the eight days the window stays open past the
+expected date. Two further rules fall out of it:
+
+- A stamp is matched **per cycle, not by exact date equality.** Calendar Sync nudges
+  `next_earnings_date` by a day or two as the source refines it, and exact equality reads the
+  shift as a brand-new cycle and re-sends a notice already sent for the same quarter.
+- The absence stamps leave `next_earnings_date` and `last_notified_period` untouched, so the
+  ticker stays in-window: the alert suppresses the *alert*, never the result. A result arriving
+  later in the window is still detected and announced in full, and that clears both stamps.
+
+A corollary for the source adapter: a scheduled date the source lists and never fills in must
+not be persisted as `next_earnings_date` once its window has closed. Doing so made a ticker
+permanently overdue with no natural end, since the weekly sync kept restoring the same past
+date. The honest value there is no date at all — the ticker is still queried on every run (it
+has no window to be outside of), but it can no longer be late for a date nobody is expecting.
 
 ### Two scheduled processes, not one
 

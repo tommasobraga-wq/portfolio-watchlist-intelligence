@@ -35,7 +35,7 @@ def test_unavailable_is_distinct_from_no_data() -> None:
 def test_latest_is_the_first_published_quarter() -> None:
     earnings = TickerEarnings(
         "UCG.MI",
-        next_date=date(2026, 10, 22),
+        scheduled=(date(2026, 10, 22),),
         published=(report(date(2026, 7, 23), 1.80, 1.79), report(date(2026, 5, 5), 2.09, 1.85)),
     )
 

@@ -8,7 +8,7 @@ it takes `today` as an argument and is tested against fakes with invented dates.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -179,7 +179,14 @@ def _silence(
         # `last_notified_period`, which would read as "already handled" and stay silent.
         covers = _covers_cycle(report, expected)
 
-        if days_late >= OVERDUE_AFTER_DAYS and not covers:
+        if (
+            days_late >= OVERDUE_AFTER_DAYS
+            and not covers
+            # Once per cycle, not once per run. Nothing else in this branch changes between
+            # runs — the report is absent either way — so without this stamp the same mail
+            # goes out on every run for every day the date stays past and unanswered.
+            and not _same_cycle(ticker.last_notified_overdue_date, expected)
+        ):
             return Decision(
                 ticker.symbol,
                 Outcome.OVERDUE,
@@ -187,9 +194,13 @@ def _silence(
                 expected_on=expected,
                 days_overdue=days_late,
                 source_last_seen=report.reported_date if report else None,
-                heads_up_already_sent=ticker.last_notified_due_date == expected,
+                heads_up_already_sent=_same_cycle(ticker.last_notified_due_date, expected),
             )
-        if days_late == 0 and not covers and ticker.last_notified_due_date != expected:
+        if (
+            days_late == 0
+            and not covers
+            and not _same_cycle(ticker.last_notified_due_date, expected)
+        ):
             # Today is the expected day itself. Days 1-2 fall through to plain silence
             # below unchanged — this fires exactly once, on the day itself, so a late
             # source is not mistaken for one that never checked.
@@ -210,6 +221,35 @@ def _covers_cycle(report: EarningsReport | None, expected: date) -> bool:
     return report.reported_date >= expected - timedelta(days=WINDOW_OPENS_DAYS_BEFORE)
 
 
+def _same_cycle(stamp: date | None, expected: date) -> bool:
+    """Whether a notice stamped for a nearby expected date belongs to this same cycle.
+
+    Calendar Sync nudges `next_earnings_date` by a day or two as the source refines it, and
+    exact equality reads the shifted date as a brand-new cycle — re-sending a notice already
+    sent for the same quarter. A reporting cycle is ~90 days, so a window-wide tolerance
+    cannot reach back into the previous one or forward into the next.
+    """
+    if stamp is None:
+        return False
+    return abs((expected - stamp).days) <= WINDOW_CLOSES_DAYS_AFTER
+
+
+def next_expected(scheduled: tuple[date, ...], today: date) -> date | None:
+    """The earliest scheduled date that is still a forward-looking expectation.
+
+    Yahoo lists rows it never fills in, so the earliest scheduled date can be one whose
+    window has already closed. Such a date is not "the next report" but an abandoned row,
+    and persisting it makes the ticker overdue on every run for as long as it is tracked,
+    with no natural end — the weekly sync just writes the same past date back.
+
+    `None` is the honest answer there, and it puts the ticker on the always-checked path
+    (see `results_watch`): still queried, but with no window and so no overdue alert. A
+    source exposing no usable forward date is not the same as a company being late.
+    """
+    usable = [d for d in scheduled if today <= d + timedelta(days=WINDOW_CLOSES_DAYS_AFTER)]
+    return min(usable) if usable else None
+
+
 def is_source_stale(decision: Decision, today: date) -> bool:
     """Whether the gap is the source's rather than the company's."""
     if decision.source_last_seen is None:
@@ -226,29 +266,28 @@ def apply(ticker: TrackedTicker, decision: Decision) -> TrackedTicker:
     `last_notified_date` is stamped alongside it — the same event, but human-readable, for
     display (`period` is a de-dup key only, never meant to be read — see its docstring).
 
-    On DUE_TODAY only the day-0 stamp is written: `next_earnings_date` and
-    `last_notified_period` are left untouched, because the ticker must stay in-window so a
-    real result arriving later the same day (or on a subsequent run) is still caught.
+    On DUE_TODAY and OVERDUE only that notice's own stamp is written: `next_earnings_date`
+    and `last_notified_period` are left untouched, because the ticker must stay in-window so
+    a real result arriving later the same day (or on a subsequent run) is still caught.
+
+    Every branch builds the new record with `replace`, which carries unmentioned fields
+    across by construction. Re-listing the fields by hand is how `last_notified_date` came
+    to be silently dropped on the dividend path, disabling the stale-report guard that
+    depends on it.
     """
     if decision.outcome is Outcome.DUE_TODAY:
-        return TrackedTicker(
-            symbol=ticker.symbol,
-            label=ticker.label,
-            next_earnings_date=ticker.next_earnings_date,
-            last_notified_period=ticker.last_notified_period,
-            last_notified_dividend_date=ticker.last_notified_dividend_date,
-            last_notified_due_date=decision.expected_on,
-            last_notified_date=ticker.last_notified_date,
-        )
+        return replace(ticker, last_notified_due_date=decision.expected_on)
+    if decision.outcome is Outcome.OVERDUE:
+        return replace(ticker, last_notified_overdue_date=decision.expected_on)
     if decision.outcome not in (Outcome.NOTIFY, Outcome.ADOPTED) or decision.report is None:
         return ticker
-    return TrackedTicker(
-        symbol=ticker.symbol,
-        label=ticker.label,
+    # The cycle is over: both pending-notice stamps are cleared so the next one starts clean.
+    return replace(
+        ticker,
         next_earnings_date=None,
         last_notified_period=decision.report.period,
-        last_notified_dividend_date=ticker.last_notified_dividend_date,
         last_notified_due_date=None,
+        last_notified_overdue_date=None,
         last_notified_date=decision.report.reported_date,
     )
 
@@ -309,10 +348,7 @@ def apply_dividend(ticker: TrackedTicker, decision: DividendDecision) -> Tracked
     if decision.outcome not in (DividendOutcome.NOTIFY, DividendOutcome.ADOPTED):
         return ticker
     assert decision.dividend is not None
-    return TrackedTicker(
-        symbol=ticker.symbol,
-        label=ticker.label,
-        next_earnings_date=ticker.next_earnings_date,
-        last_notified_period=ticker.last_notified_period,
-        last_notified_dividend_date=decision.dividend.ex_date,
-    )
+    # `replace` so no earnings-side field can be dropped by omission: this function used to
+    # re-list them and silently reset `last_notified_due_date` and `last_notified_date` to
+    # their defaults, which disabled `_is_stale` for the affected ticker.
+    return replace(ticker, last_notified_dividend_date=decision.dividend.ex_date)
